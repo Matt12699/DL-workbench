@@ -4,17 +4,10 @@
         "numeric_columns":[
             "FLOW_START_MILLISECONDS",
             "FLOW_END_MILLISECONDS",
-            "L4_SRC_PORT",
-            "L4_DST_PORT",
-            "PROTOCOL",
-            "L7_PROTO",
             "IN_BYTES",
             "IN_PKTS",
             "OUT_BYTES",
             "OUT_PKTS",
-            "TCP_FLAGS",
-            "CLIENT_TCP_FLAGS",
-            "SERVER_TCP_FLAGS",
             "FLOW_DURATION_MILLISECONDS",
             "DURATION_IN",
             "DURATION_OUT",
@@ -41,8 +34,6 @@
             "TCP_WIN_MAX_OUT",
             "ICMP_TYPE",
             "ICMP_IPV4_TYPE",
-            "DNS_QUERY_ID",
-            "DNS_QUERY_TYPE",
             "DNS_TTL_ANSWER",
             "FTP_COMMAND_RET_CODE",
             "SRC_TO_DST_IAT_MIN",
@@ -58,8 +49,18 @@
         ],
 
         "categorical_columns":[
-            "IPV4_SRC_ADDR",
-            "IPV4_DST_ADDR"
+            "L4_SRC_PORT",
+            "L4_DST_PORT",
+            "L7_PROTO",
+            "PROTOCOL",
+            "TCP_FLAGS",
+            "CLIENT_TCP_FLAGS",
+            "SERVER_TCP_FLAGS",
+            "ICMP_TYPE",
+            "ICMP_IPV4_TYPE",
+            "DNS_QUERY_ID",
+            "DNS_QUERY_TYPE"
+          
 
         ],
 
