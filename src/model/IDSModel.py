@@ -14,11 +14,18 @@ class IDSModel(nn.Module):
         # Creiamo un contenitore sequenziale il quale conterrà una serie di livelli neurali definiti in ordine
         self.linear_relu_stack = nn.Sequential (
             
-            nn.Linear(num_features, 128),
-            # Funzione di attivazione ReLU applicata all'output del livello precedente
+            nn.Linear(num_features, 128), # Layer 1: Input -> 128 neuroni
+            nn.LayerNorm(128),
+            nn.ReLU(), 
+            nn.Dropout(0.1), 
+            nn.Linear(128, 64), # Layer 2: 128 -> 64 neuroni
+            nn.LayerNorm(64),
             nn.ReLU(),
-            # Contiene un output a due neuroni
-            nn.Linear(128, 2)
+            nn.Dropout(0.1), 
+            nn.Linear(64, 32), # Layer 3: 64 -> 32 neuroni
+            nn.LayerNorm(32),
+            nn.ReLU(),
+            nn.Linear(32, 1) # Layer di Output: 64 -> 1 neurone 
         )
 
     # Passiamo l'input attraverso l'intera sequenza
