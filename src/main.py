@@ -99,7 +99,7 @@ def prepare_data(input_path: str, output_path: str, dataset_name: str):
         test_df.to_csv(output_path + "_Test.csv", index=False)
         logging.info("Saved Datasets")
 
-def train_model(processed_csv_path: str, dataset_name: str, positive_label_value: int, plots_dir_train: str , early_stopping_metric: str):
+def train_model(processed_csv_path: str, dataset_name: str, positive_label_value: int, plots_dir_train: str , early_stopping_metric: str, model_config: str):
 
     logging.info("Training model...")
 
@@ -111,7 +111,9 @@ def train_model(processed_csv_path: str, dataset_name: str, positive_label_value
 
     if early_stopping_metric == None:
         early_stopping_metric = 'val_loss'
-        
+
+    if model_config == None:
+        model_config = 'small'
 
     # Creo la directory per i plot se non esiste
     if not os.path.exists(plots_dir_train):
@@ -119,12 +121,22 @@ def train_model(processed_csv_path: str, dataset_name: str, positive_label_value
         logging.info(f"Created directory for plots: {plots_dir_train}")
     
 
-    # Carico la configurazione dal JSON
+    # Carico la configurazione del dataset dal JSON
     config_path= "config/dataset.json"
     config_manager = ConfigManager()
     config_manager.load_config(config_path)
 
     target_column = config_manager.get_value(dataset_name, "target_column")
+
+    # Carico la configurazione degli iperparametri dell'encoder dal JSON
+    config_path= "config/hyperparameters.json"
+    config_manager.load_config(config_path)
+    encoder_config = config_manager.get_value(model_config, "encoder")
+
+    learningRate = config_manager.get_value(model_config, "lr")
+    dropout = encoder_config["dropout"]
+    hidden_layers = encoder_config["hidden_layers"]
+    output_dim = encoder_config["output_dim"]
 
     full_dataset = CSVTabularDataset(processed_csv_path, target_column=target_column)
 
@@ -148,7 +160,7 @@ def train_model(processed_csv_path: str, dataset_name: str, positive_label_value
     device = torch.accelerator.current_accelerator().type if torch.accelerator.is_available() else "cpu"
     logging.info(f"Using device: {device}")
 
-    model = IDSModel(num_features=num_features).to(device)
+    model = IDSModel(num_features=num_features, dropout=dropout, hidden_layers=hidden_layers, output_dim=output_dim).to(device)
 
     # --- Calcolo pos_weight per BCEWithLogitsLoss ---
     # Raccolgo tutte le etichette dal DataLoader di training
@@ -184,7 +196,7 @@ def train_model(processed_csv_path: str, dataset_name: str, positive_label_value
 
     # Definisco l'algoritmo di ottimizzazione
     optimizer = optim.Adam(model.parameters(),
-                          lr=1e-4)
+                          lr=learningRate)
     
     # Definisco il training Loop
     # Numero di epoche
@@ -340,7 +352,14 @@ def train_model(processed_csv_path: str, dataset_name: str, positive_label_value
         if improved:
             best_metric_val = current_metric_to_check
             epochs_no_improve = 0
-            torch.save(model.state_dict(), save_path)
+            model_checkpoint = {
+                'num_features': num_features, 
+                'dropout_rate': dropout, 
+                'hidden_layers_config': hidden_layers,
+                'output_dim': output_dim, 
+                'model_state_dict': model.state_dict()
+            }
+            torch.save(model_checkpoint, save_path)
             logging.info(f"Epoch {epoch+1}: {early_stopping_metric} improved to {best_metric_val:.4f}. Model saved to {save_path}")
         else:
             epochs_no_improve += 1
@@ -408,17 +427,35 @@ def evaluate_model(model_path: str, processed_csv_path: str, dataset_name: str, 
     # Selezioniamo il dispositivo da usare: GPU, CPU...
     device = torch.accelerator.current_accelerator().type if torch.accelerator.is_available() else "cpu"
 
-    model = IDSModel(num_features=num_features).to(device)
+    if model_path == None:
+        logging.warning(f"Error: Model file cannot be None")
+        exit()
 
     # Carico lo stato del modello
     try:
-        model.load_state_dict(torch.load(model_path, map_location=device))
+        checkpoint = torch.load(model_path, map_location=device)
+
+        # Estraggo i parametri di configurazione dal checkpoint
+        num_features_loaded = checkpoint['num_features']
+        dropout_rate_loaded = checkpoint['dropout_rate']
+        hidden_layers_config_loaded = checkpoint['hidden_layers_config']
+        output_dim_loaded = checkpoint['output_dim']
+
+        # Creo l'istanza del modello con i parametri caricati
+        model = IDSModel(num_features=num_features_loaded,
+                     dropout=dropout_rate_loaded, 
+                     hidden_layers=hidden_layers_config_loaded, output_dim=output_dim_loaded).to(device) 
+
+        # Carica i pesi
+        model.load_state_dict(checkpoint['model_state_dict'])
+        logging.info(f"Model loaded successfully from checkpoint: {model_path}")
+
     except FileNotFoundError:
         logging.warning(f"Error: Model file not found in: {model_path}")
-        # return None
+        exit()
     except RuntimeError as e:
         logging.warning(f"Error during the model loading: {e}")
-        # return None
+        exit()
 
     # Inizializzo le liste che conterranno le etichette predette e quelle vere
     all_predictions = []
@@ -576,8 +613,8 @@ if __name__ == "__main__":
 
     parser.register_subcommands(
         "train",
-        ["--input", "--dataset", "--positiveLabel", "--plotsDir", "--earlyMetric"],
-        ["The input path for the processed data.", "The name of the dataset", "The value of the positive label", "The path for the plots", "The early stopping metric"],
+        ["--input", "--dataset", "--positiveLabel", "--plotsDir", "--earlyMetric", "--config"],
+        ["The input path for the processed data.", "The name of the dataset", "The value of the positive label", "The path for the plots", "The early stopping metric", "The name of the model configuration"],
     )
 
     parser.register_subcommands(
@@ -591,7 +628,7 @@ if __name__ == "__main__":
     if args.subcommand == "prepare":
         prepare_data(args.input, args.output, args.dataset)
     elif args.subcommand == "train":
-        train_model(args.input, args.dataset, args.positiveLabel, args.plotsDir, args.earlyMetric)
+        train_model(args.input, args.dataset, args.positiveLabel, args.plotsDir, args.earlyMetric, args.config)
     elif args.subcommand == "evaluate":
         evaluate_model(args.model, args.input, args.dataset, args.positiveLabel, args.plotsDir)
 
