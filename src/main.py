@@ -128,20 +128,39 @@ def train_model(processed_csv_path: str, dataset_name: str, positive_label_value
 
     target_column = config_manager.get_value(dataset_name, "target_column")
 
-    # Carico la configurazione degli iperparametri dell'encoder dal JSON
-    config_path= "config/hyperparameters.json"
-    config_manager.load_config(config_path)
-    encoder_config = config_manager.get_value(model_config, "encoder")
-
-    learningRate = config_manager.get_value(model_config, "lr")
-    dropout = encoder_config["dropout"]
-    hidden_layers = encoder_config["hidden_layers"]
-    output_dim = encoder_config["output_dim"]
-
     full_dataset = CSVTabularDataset(processed_csv_path, target_column=target_column)
 
     # Ottengo il numero di feature dal dataset 
     num_features = full_dataset.X.shape[1]
+
+    # Carico la configurazione degli iperparametri dal JSON
+    config_path= "config/hyperparameters.json"
+    config_manager.load_config(config_path)
+    encoder_config = config_manager.get_value(model_config, "encoder")
+    decoder_config = config_manager.get_value(model_config, "decoder")
+    classifier_config = config_manager.get_value(model_config, "classifier")
+
+    learningRate = config_manager.get_value(model_config, "lr")
+
+    encoderDropout = encoder_config["dropout"]
+    encoderHidden_layers = encoder_config["hidden_layers"]
+
+    decoderDropout = decoder_config["dropout"]
+    decoderHidden_layers = decoder_config["hidden_layers"]
+
+    classifierDropout = classifier_config["dropout"]
+    classifierHidden_layers = classifier_config["hidden_layers"]
+
+    # Stabilisco input e output
+    
+    encoderInput_dim = num_features
+    encoderOutput_dim = encoder_config["output_dim"]
+
+    decoderInput_dim = encoderOutput_dim
+    decoderOutput_dim = num_features
+
+    classifierInput_dim = decoderOutput_dim
+    classifierOutput_dim = classifier_config["output_dim"]
 
     train_ratio = 0.9
 
@@ -160,7 +179,10 @@ def train_model(processed_csv_path: str, dataset_name: str, positive_label_value
     device = torch.accelerator.current_accelerator().type if torch.accelerator.is_available() else "cpu"
     logging.info(f"Using device: {device}")
 
-    model = IDSModel(num_features=num_features, dropout=dropout, hidden_layers=hidden_layers, output_dim=output_dim).to(device)
+    # Creo i modelli
+    encoder = IDSModel(dropout=encoderDropout, hidden_layers=encoderHidden_layers, input_dim=encoderInput_dim, output_dim=encoderOutput_dim).to(device)
+    decoder = IDSModel(dropout=decoderDropout, hidden_layers=decoderHidden_layers, input_dim=decoderInput_dim ,output_dim=decoderOutput_dim).to(device)
+    classifier = IDSModel(dropout=classifierDropout, hidden_layers=classifierHidden_layers, input_dim=classifierInput_dim ,output_dim=classifierOutput_dim).to(device)
 
     # --- Calcolo pos_weight per BCEWithLogitsLoss ---
     # Raccolgo tutte le etichette dal DataLoader di training
@@ -186,16 +208,21 @@ def train_model(processed_csv_path: str, dataset_name: str, positive_label_value
         pos_weight_value = num_negatives_train / num_positives_train
         logging.info(f"pos_weight for BCEWithLogitsLoss: {pos_weight_value:.4f}")
         pos_weight_tensor = torch.tensor([pos_weight_value], device=device) # Sposta sul device corretto
-        criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight_tensor)
+        criterion_classification = nn.BCEWithLogitsLoss(pos_weight=pos_weight_tensor)
     else:
         logging.warning("Could not calculate pos_weight (only one class present). Using unweighted BCEWithLogitsLoss.")
-        criterion = nn.BCEWithLogitsLoss()
+        criterion_classification = nn.BCEWithLogitsLoss()
 
     # --- Fine Calcolo pos_weight ---
 
+    # Loss per capire la ricostruzione dell'input
+    criterion_autoEncoder = nn.MSELoss()
+
 
     # Definisco l'algoritmo di ottimizzazione
-    optimizer = optim.Adam(model.parameters(),
+    params_to_optimize = list(encoder.parameters()) + list(decoder.parameters()) + list(classifier.parameters())
+
+    optimizer = optim.Adam(params_to_optimize,
                           lr=learningRate)
     
     # Definisco il training Loop
@@ -204,8 +231,10 @@ def train_model(processed_csv_path: str, dataset_name: str, positive_label_value
 
     history = {
         'epoch': [],
-        'train_loss':[],
-        'val_loss': [],
+        'autoEncoder_train_loss':[],
+        'classifier_train_loss':[],
+        'autoEncoder_val_loss': [],
+        'classifier_val_loss': [],
         'val_f1': [],
         'val_precision': [],
         'val_recall': [],
@@ -234,11 +263,14 @@ def train_model(processed_csv_path: str, dataset_name: str, positive_label_value
     for epoch in range(N_EPOCHS):
 
         # Per ogni epoca capiamo quanta è la loss
-        train_loss= 0.0
-        model.train()
+        total_autoEncoder_train_loss= 0.0
+        total_classifier_train_loss= 0.0
+        encoder.train()
+        decoder.train()
+        classifier.train()
         for inputs, labels in train_dataLoader:
 
-            # Sposta input e label alla GPU se è disponibile
+            # Sposta input alla GPU se disponibile
             inputs = inputs.to(device)
 
             # Aggiunge una dimensione e converte a float
@@ -248,39 +280,56 @@ def train_model(processed_csv_path: str, dataset_name: str, positive_label_value
             # Serve a far si che l'ottimizzatore aggiorni i parametri del modello correttamente
             optimizer.zero_grad()
 
-            # Passo l'input al modello per ottenere l'output
-            outputs = model(inputs)
+            # -- Auto-Encoder --
+            encoded_representation = encoder(inputs)
+            reconstructed_output = decoder(encoded_representation)
 
-            # Calcolo la loss
-            loss=criterion(outputs, labels)
+            # Passo l'input al modello per ottenere l'output
+            outputs = classifier(reconstructed_output)
+
+            # Calcolo delle loss
+            loss_autoEncoder = criterion_autoEncoder(reconstructed_output, inputs)
+            loss_classification=criterion_classification(outputs, labels)
+            combined_loss = loss_autoEncoder + loss_classification
 
             # Backpropagation: calcolo i gradienti
-            loss.backward()
+            combined_loss.backward()
 
             # Aggiusto i parametri basati sui gradienti
             optimizer.step()
 
-            train_loss += loss.item()
+            total_autoEncoder_train_loss += loss_autoEncoder.item()
+            total_classifier_train_loss += loss_classification.item()
 
         # Inizializzo le liste che conterranno le etichette predette e quelle vere
         all_predictions = []
         all_true_labels = []
 
         # Validation
-        val_loss = 0.0
-        model.eval()
+        total_classifier_val_loss = 0.0
+        total_autoEncoder_val_loss = 0.0
+        encoder.eval()
+        decoder.eval()
+        classifier.eval()
+
         for inputs, labels in val_dataLoader:
 
             inputs = inputs.to(device)
-
             # Aggiunge una dimensione e converte a float
             labels = labels.float().unsqueeze(1).to(device) 
 
-            outputs = model(inputs)
+            # -- Auto-Encoder --
+            encoded_representation = encoder(inputs)
+            reconstructed_output = decoder(encoded_representation)
 
-            loss = criterion(outputs, labels)
+            outputs = classifier(reconstructed_output)
 
-            val_loss += loss.item()
+            # Calcolo delle loss
+            loss_autoEncoder = criterion_autoEncoder(reconstructed_output, inputs)
+            loss_classification = criterion_classification(outputs, labels)
+
+            total_autoEncoder_val_loss += loss_autoEncoder.item()
+            total_classifier_val_loss += loss_classification.item()
 
             # Applico la sigmoide per convertire in probabilità
             probs_val = torch.sigmoid(outputs).cpu()
@@ -297,8 +346,10 @@ def train_model(processed_csv_path: str, dataset_name: str, positive_label_value
         y_pred_np = np.array(all_predictions)
 
         # Calcolo le metriche
-        avg_train_loss = train_loss/len(train_dataLoader)
-        avg_val_loss = val_loss/len(val_dataLoader)
+        avg_classifier_train_loss = total_classifier_train_loss/len(train_dataLoader)
+        avg_autoEncoder_train_loss = total_autoEncoder_train_loss/len(train_dataLoader)
+        avg_classifier_val_loss = total_classifier_val_loss/len(val_dataLoader)
+        avg_autoEncoder_val_loss = total_autoEncoder_val_loss/len(val_dataLoader)
         f1 = f1_score(y_true_np, y_pred_np, pos_label=positive_label_value, average='binary', zero_division=0)
         precision = precision_score(y_true_np, y_pred_np, pos_label=positive_label_value, average='binary', zero_division=0)
         recall = recall_score(y_true_np, y_pred_np, pos_label=positive_label_value, average='binary', zero_division=0)
@@ -307,8 +358,10 @@ def train_model(processed_csv_path: str, dataset_name: str, positive_label_value
 
         print("\n====================")
         print(f"Epoch: {epoch+1}/{N_EPOCHS}")
-        print(f"Training Loss: {avg_train_loss:.4f}")
-        print(f"Validation Loss: {avg_val_loss:.4f}, ")
+        print(f"Auto-Encoder Training Loss: {avg_autoEncoder_train_loss:.4f}")
+        print(f"Classifier Training Loss: {avg_classifier_train_loss:.4f}")
+        print(f"Auto-Encoder Validation Loss: {avg_autoEncoder_val_loss:.4f} ")
+        print(f"Classifier Validation Loss: {avg_classifier_val_loss:.4f} ")
         print(f"F1-score: {f1}")
         print(f"Precision: {precision}")
         print(f"Recall: {recall}")
@@ -317,8 +370,10 @@ def train_model(processed_csv_path: str, dataset_name: str, positive_label_value
 
         # Popolo il dizionario history
         history['epoch'].append(epoch + 1)
-        history['train_loss'].append(train_loss/len(train_dataLoader))
-        history['val_loss'].append(val_loss/len(val_dataLoader)) 
+        history['autoEncoder_train_loss'].append(total_autoEncoder_train_loss/len(train_dataLoader))
+        history['classifier_train_loss'].append(total_classifier_train_loss/len(train_dataLoader))
+        history['autoEncoder_val_loss'].append(total_autoEncoder_val_loss/len(val_dataLoader))
+        history['classifier_val_loss'].append(total_classifier_train_loss/len(train_dataLoader)) 
         history['val_f1'].append(f1); 
         history['val_precision'].append(precision)
         history['val_recall'].append(recall); 
@@ -328,7 +383,7 @@ def train_model(processed_csv_path: str, dataset_name: str, positive_label_value
         # La differenza è principalmente tra la loss che deve diminuire e le altre metriche
         current_metric_to_check = 0.0
         if early_stopping_metric == 'val_loss':
-            current_metric_to_check = avg_val_loss
+            current_metric_to_check = avg_classifier_val_loss
             improved = (best_metric_val - current_metric_to_check) > early_stopping_min_delta
         elif early_stopping_metric == 'val_f1':
             current_metric_to_check = f1
@@ -344,20 +399,20 @@ def train_model(processed_csv_path: str, dataset_name: str, positive_label_value
             improved = (current_metric_to_check - best_metric_val) > early_stopping_min_delta
         else: # Default a val_loss se la metrica non è riconosciuta
             logging.warning(f"Unknown early_stopping_metric: {early_stopping_metric}. Defaulting to val_loss.")
-            current_metric_to_check = avg_val_loss
+            current_metric_to_check = avg_classifier_val_loss
             improved = (best_metric_val - current_metric_to_check) > early_stopping_min_delta
-            early_stopping_metric = 'val_loss' # Aggiorna per coerenza nel logging
+            early_stopping_metric = 'classifier_val_loss' # Aggiorna per coerenza nel logging
 
 
         if improved:
             best_metric_val = current_metric_to_check
             epochs_no_improve = 0
-            model_checkpoint = {
-                'num_features': num_features, 
-                'dropout_rate': dropout, 
-                'hidden_layers_config': hidden_layers,
-                'output_dim': output_dim, 
-                'model_state_dict': model.state_dict()
+            model_checkpoint = { 
+                'dropout_rate': classifierDropout, 
+                'hidden_layers_config': classifierHidden_layers,
+                'output_dim': classifierOutput_dim, 
+                'input_dim': classifierInput_dim,
+                'model_state_dict': classifier.state_dict()
             }
             torch.save(model_checkpoint, save_path)
             logging.info(f"Epoch {epoch+1}: {early_stopping_metric} improved to {best_metric_val:.4f}. Model saved to {save_path}")
@@ -372,9 +427,11 @@ def train_model(processed_csv_path: str, dataset_name: str, positive_label_value
     # --- SEZIONE GRAFICI ---
     # 1. Grafico Training Loss vs Validation Loss
     plt.figure(figsize=(10, 6))
-    plt.plot(history['epoch'], history['train_loss'], label='Training Loss', marker='o')
-    plt.plot(history['epoch'], history['val_loss'], label='Validation Loss', marker='o')
-    plt.title(f'Training & Validation Loss Over Epochs ({dataset_name})')
+    plt.plot(history['epoch'], history['autoEncoder_train_loss'], label='Auto-Encoder Training Loss', marker='o')
+    plt.plot(history['epoch'], history['classifier_train_loss'], label='Classifier Training Loss', marker='o')
+    plt.plot(history['epoch'], history['autoEncoder_val_loss'], label='Auto-Encoder Validation Loss', marker='o')
+    plt.plot(history['epoch'], history['classifier_val_loss'], label='Classifier Validation Loss', marker='o')
+    plt.title(f'Classifier and Auto-Encoder Training & Validation Loss Over Epochs ({dataset_name})')
     plt.xlabel('Epoch'); plt.ylabel('Loss'); plt.legend(); plt.grid(True)
     plt.savefig(os.path.join(plots_dir_train, f'loss_curve_{dataset_name}.png'))
     plt.close()
@@ -418,9 +475,6 @@ def evaluate_model(model_path: str, processed_csv_path: str, dataset_name: str, 
 
     test_dataset = CSVTabularDataset(processed_csv_path, target_column=target_column)
 
-    # Ottengo il numero di feature dal dataset 
-    num_features = test_dataset.X.shape[1]
-
     # Divido i campioni in batch
     test_dataLoader = DataLoader(test_dataset, batch_size=64, shuffle=False)
 
@@ -436,15 +490,13 @@ def evaluate_model(model_path: str, processed_csv_path: str, dataset_name: str, 
         checkpoint = torch.load(model_path, map_location=device)
 
         # Estraggo i parametri di configurazione dal checkpoint
-        num_features_loaded = checkpoint['num_features']
         dropout_rate_loaded = checkpoint['dropout_rate']
         hidden_layers_config_loaded = checkpoint['hidden_layers_config']
+        input_dim_loaded = checkpoint['input_dim']
         output_dim_loaded = checkpoint['output_dim']
 
         # Creo l'istanza del modello con i parametri caricati
-        model = IDSModel(num_features=num_features_loaded,
-                     dropout=dropout_rate_loaded, 
-                     hidden_layers=hidden_layers_config_loaded, output_dim=output_dim_loaded).to(device) 
+        model = IDSModel(dropout=dropout_rate_loaded, hidden_layers=hidden_layers_config_loaded, input_dim=input_dim_loaded, output_dim=output_dim_loaded).to(device) 
 
         # Carica i pesi
         model.load_state_dict(checkpoint['model_state_dict'])

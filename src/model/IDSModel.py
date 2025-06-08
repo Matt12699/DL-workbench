@@ -7,14 +7,13 @@ from utilities.config_manager import ConfigManager
 
 class IDSModel(nn.Module):
 
-    def __init__(self, num_features, dropout, hidden_layers, output_dim):
+    def __init__(self, dropout, hidden_layers, input_dim, output_dim):
 
         # Eredito il costruttore della classe base
         super(IDSModel, self).__init__()
 
         # Creo i layer in base a quello che ho impostato nel file json
         layers=[]
-        input_dim = num_features
         for i, unit in enumerate(hidden_layers):
             layers.append(nn.Linear(input_dim, unit))
             layers.append(nn.LayerNorm(unit))
