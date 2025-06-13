@@ -15,7 +15,7 @@
 
       "classifier": {
       "dropout": 0.1,
-      "hidden_layers": [128,64,32],
+      "hidden_layers": [64,32,16],
       "output_dim": 1
       }
   }

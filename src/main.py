@@ -159,7 +159,7 @@ def train_model(processed_csv_path: str, dataset_name: str, positive_label_value
     decoderInput_dim = encoderOutput_dim
     decoderOutput_dim = num_features
 
-    classifierInput_dim = decoderOutput_dim
+    classifierInput_dim = encoderOutput_dim
     classifierOutput_dim = classifier_config["output_dim"]
 
     train_ratio = 0.9
@@ -183,6 +183,173 @@ def train_model(processed_csv_path: str, dataset_name: str, positive_label_value
     encoder = IDSModel(dropout=encoderDropout, hidden_layers=encoderHidden_layers, input_dim=encoderInput_dim, output_dim=encoderOutput_dim).to(device)
     decoder = IDSModel(dropout=decoderDropout, hidden_layers=decoderHidden_layers, input_dim=decoderInput_dim ,output_dim=decoderOutput_dim).to(device)
     classifier = IDSModel(dropout=classifierDropout, hidden_layers=classifierHidden_layers, input_dim=classifierInput_dim ,output_dim=classifierOutput_dim).to(device)
+
+    # Loss per capire la ricostruzione dell'input
+    criterion_autoEncoder = nn.MSELoss()
+    
+    # Definisco il training Loop
+    # Numero di epoche
+    N_EPOCHS = 100
+ 
+    history = {
+        'epochAutoEncoder': [],
+        'epochClassifier': [],
+        'autoEncoder_train_loss':[],
+        'classifier_train_loss':[],
+        'autoEncoder_val_loss': [],
+        'classifier_val_loss': [],
+        'val_f1': [],
+        'val_precision': [],
+        'val_recall': [],
+        'val_pr_auc':[]
+    }  
+    
+
+    # Parametri per Early Stopping
+    early_stopping_patience = 10
+    early_stopping_min_delta = 0.0001 # Miglioramento minimo per considerarlo tale
+
+    # --- Inizializzazione Variabili per Early Stopping e Model Checkpointing ---
+    AutoEncoder_best_metric_val = float('inf') 
+    classifier_best_metric_val = -float('inf') if early_stopping_metric != 'val_loss' else float('inf')
+    epochs_no_improve = 0
+
+    Encoder_save_path = r"src\model\trained_encoder.pth"
+    Classifier_save_path = r"src\model\trained_model.pth"
+
+    classifier_save_dir = os.path.dirname(Classifier_save_path)
+    if not os.path.exists(classifier_save_dir):
+        os.makedirs(classifier_save_dir)
+        logging.info(f"Created directory for model: {Classifier_save_path}")
+
+    encoder_save_dir = os.path.dirname(Encoder_save_path)
+    if not os.path.exists(encoder_save_dir):
+        os.makedirs(encoder_save_dir)
+        logging.info(f"Created directory for encoder: {Encoder_save_path}")
+    
+    logging.info(f"AutoEncoder Early stopping enabled: monitoring 'val_loss', patience={early_stopping_patience}, min_delta={early_stopping_min_delta}")
+    logging.info(f"Best model will be saved to: {Encoder_save_path}")
+
+    # Definisco l'algoritmo di ottimizzazione per l'Auto-Encoder
+    params_AutoEncoder = list(encoder.parameters()) + list(decoder.parameters()) 
+
+    optimizer = optim.Adam(params_AutoEncoder,
+                          lr=learningRate)
+    
+    logging.info("Auto-Encoder training is starting")
+
+    # Training Auto-Encoder
+    for epoch in range(N_EPOCHS):
+
+        # Per ogni epoca capiamo quanta è la loss
+        total_autoEncoder_train_loss= 0.0
+        encoder.train()
+        decoder.train()
+        for inputs, _ in train_dataLoader:
+
+            # Sposta input alla GPU se disponibile
+            inputs = inputs.to(device)
+
+            # Azzero i gradienti accumulati dai passsaggi precedenti
+            # Serve a far si che l'ottimizzatore aggiorni i parametri del modello correttamente
+            optimizer.zero_grad()
+
+            # -- Auto-Encoder --
+            encoded_representation = encoder(inputs)
+            reconstructed_output = decoder(encoded_representation)
+
+            # Calcolo della loss
+            loss_autoEncoder = criterion_autoEncoder(reconstructed_output, inputs)
+
+            # Backpropagation: calcolo i gradienti
+            loss_autoEncoder.backward()
+
+            # Aggiusto i parametri basati sui gradienti
+            optimizer.step()
+
+            total_autoEncoder_train_loss += loss_autoEncoder.item()
+
+        # Validation Auto-Encoder
+        total_autoEncoder_val_loss = 0.0
+        encoder.eval()
+        decoder.eval()
+
+        for inputs, _ in val_dataLoader:
+
+            inputs = inputs.to(device)
+
+            # -- Auto-Encoder --
+            encoded_representation = encoder(inputs)
+            reconstructed_output = decoder(encoded_representation)
+
+            # Calcolo delle loss
+            loss_autoEncoder = criterion_autoEncoder(reconstructed_output, inputs)
+
+            total_autoEncoder_val_loss += loss_autoEncoder.item()
+
+        # Calcolo le metriche dell'Auto-Encoder
+        avg_autoEncoder_train_loss = total_autoEncoder_train_loss/len(train_dataLoader)
+        avg_autoEncoder_val_loss = total_autoEncoder_val_loss/len(val_dataLoader)
+
+        print("\n====================")
+        print(f"Epoch: {epoch+1}/{N_EPOCHS}")
+        print(f"Auto-Encoder Training Loss: {avg_autoEncoder_train_loss:.4f}")
+        print(f"Auto-Encoder Validation Loss: {avg_autoEncoder_val_loss:.4f} ")
+        print("====================\n")
+
+        # Popolo il dizionario history per quanto riguarda l'autoEncoder
+        history['epochAutoEncoder'].append(epoch + 1)
+        history['autoEncoder_train_loss'].append(total_autoEncoder_train_loss/len(train_dataLoader))
+        history['autoEncoder_val_loss'].append(total_autoEncoder_val_loss/len(val_dataLoader))
+
+        # --- Logica di Early Stopping e Model Checkpointing ---
+        current_metric_to_check = avg_autoEncoder_val_loss
+        improved = (AutoEncoder_best_metric_val - current_metric_to_check) > early_stopping_min_delta
+
+
+        if improved:
+            AutoEncoder_best_metric_val = current_metric_to_check
+            epochs_no_improve = 0
+            model_checkpoint = { 
+                'dropout_rate': encoderDropout, 
+                'hidden_layers_config': encoderHidden_layers,
+                'output_dim': encoderOutput_dim, 
+                'input_dim': encoderInput_dim,
+                'model_state_dict': encoder.state_dict()
+            }
+            torch.save(model_checkpoint, Encoder_save_path)
+            logging.info(f"Epoch {epoch+1}: val_loss improved to {AutoEncoder_best_metric_val:.4f}. Model saved to {Encoder_save_path}")
+        else:
+            epochs_no_improve += 1
+            logging.info(f"Epoch {epoch+1}: val_loss did not improve from {AutoEncoder_best_metric_val:.4f}. Patience: {epochs_no_improve}/{early_stopping_patience}")
+
+        if epochs_no_improve >= early_stopping_patience:
+            logging.info(f"Early stopping triggered after {epoch+1} epochs. Best {early_stopping_metric}: {AutoEncoder_best_metric_val:.4f}")
+            break # Esce dal loop delle epoche
+    
+    # Carico da file l'encoder migliore
+    try:
+        checkpoint = torch.load(Encoder_save_path, map_location=device)
+
+        # Estraggo i parametri di configurazione dal checkpoint
+        dropout_rate_loaded = checkpoint['dropout_rate']
+        hidden_layers_config_loaded = checkpoint['hidden_layers_config']
+        input_dim_loaded = checkpoint['input_dim']
+        output_dim_loaded = checkpoint['output_dim']
+
+        # Creo l'istanza dell'encoder con i parametri caricati
+        encoder = IDSModel(dropout=dropout_rate_loaded, hidden_layers=hidden_layers_config_loaded, input_dim=input_dim_loaded, output_dim=output_dim_loaded).to(device) 
+
+        # Carica i pesi
+        encoder.load_state_dict(checkpoint['model_state_dict'])
+        logging.info(f"Encoder loaded successfully from checkpoint: {Encoder_save_path}")
+
+    except FileNotFoundError:
+        logging.warning(f"Error: Encoder file not found in: {Encoder_save_path}")
+        exit()
+    except RuntimeError as e:
+        logging.warning(f"Error during the encoder loading: {e}")
+        exit()
 
     # --- Calcolo pos_weight per BCEWithLogitsLoss ---
     # Raccolgo tutte le etichette dal DataLoader di training
@@ -214,60 +381,27 @@ def train_model(processed_csv_path: str, dataset_name: str, positive_label_value
         criterion_classification = nn.BCEWithLogitsLoss()
 
     # --- Fine Calcolo pos_weight ---
+    
+    logging.info(f"Classifier Early stopping enabled: monitoring '{early_stopping_metric}', patience={early_stopping_patience}, min_delta={early_stopping_min_delta}")
+    logging.info(f"Best model will be saved to: {Classifier_save_path}")
 
-    # Loss per capire la ricostruzione dell'input
-    criterion_autoEncoder = nn.MSELoss()
+    # Definisco l'algoritmo di ottimizzazione per il classificatore
 
-
-    # Definisco l'algoritmo di ottimizzazione
-    params_to_optimize = list(encoder.parameters()) + list(decoder.parameters()) + list(classifier.parameters())
-
-    optimizer = optim.Adam(params_to_optimize,
+    optimizer = optim.Adam(classifier.parameters(),
                           lr=learningRate)
     
-    # Definisco il training Loop
-    # Numero di epoche
-    N_EPOCHS = 100
-
-    history = {
-        'epoch': [],
-        'autoEncoder_train_loss':[],
-        'classifier_train_loss':[],
-        'autoEncoder_val_loss': [],
-        'classifier_val_loss': [],
-        'val_f1': [],
-        'val_precision': [],
-        'val_recall': [],
-        'val_pr_auc':[]
-    }  
-    
-
-    # Parametri per Early Stopping
-    early_stopping_patience = 10
-    early_stopping_min_delta = 0.001 # Miglioramento minimo per considerarlo tale
-
-    # --- Inizializzazione Variabili per Early Stopping e Model Checkpointing ---
-    best_metric_val = -float('inf') if early_stopping_metric != 'val_loss' else float('inf')
+    # Riporto il parametro che indica le epoche senza miglioramenti a 0
     epochs_no_improve = 0
-    save_path = r"src\model\trained_model.pth"
-    save_dir = os.path.dirname(save_path)
-    if not os.path.exists(save_dir):
-        os.makedirs(save_dir)
-        logging.info(f"Created directory for model: {save_path}")
-    
-    logging.info(f"Early stopping enabled: monitoring '{early_stopping_metric}', patience={early_stopping_patience}, min_delta={early_stopping_min_delta}")
-    logging.info(f"Best model will be saved to: {save_path}")
 
-    # Training
-    # Processiamo l'intero training set in 10 epoche
+    logging.info("Classification training is starting")
+    # Training Encoder+Classificatore
     for epoch in range(N_EPOCHS):
 
         # Per ogni epoca capiamo quanta è la loss
-        total_autoEncoder_train_loss= 0.0
         total_classifier_train_loss= 0.0
         encoder.train()
-        decoder.train()
         classifier.train()
+
         for inputs, labels in train_dataLoader:
 
             # Sposta input alla GPU se disponibile
@@ -280,25 +414,21 @@ def train_model(processed_csv_path: str, dataset_name: str, positive_label_value
             # Serve a far si che l'ottimizzatore aggiorni i parametri del modello correttamente
             optimizer.zero_grad()
 
-            # -- Auto-Encoder --
+            # -- Encoder --
             encoded_representation = encoder(inputs)
-            reconstructed_output = decoder(encoded_representation)
 
-            # Passo l'input al modello per ottenere l'output
+            # Passo l'output dell'encoder al modello
             outputs = classifier(reconstructed_output)
 
-            # Calcolo delle loss
-            loss_autoEncoder = criterion_autoEncoder(reconstructed_output, inputs)
+            # Calcolo della loss
             loss_classification=criterion_classification(outputs, labels)
-            combined_loss = loss_autoEncoder + loss_classification
 
             # Backpropagation: calcolo i gradienti
-            combined_loss.backward()
+            loss_classification.backward()
 
             # Aggiusto i parametri basati sui gradienti
             optimizer.step()
 
-            total_autoEncoder_train_loss += loss_autoEncoder.item()
             total_classifier_train_loss += loss_classification.item()
 
         # Inizializzo le liste che conterranno le etichette predette e quelle vere
@@ -307,9 +437,7 @@ def train_model(processed_csv_path: str, dataset_name: str, positive_label_value
 
         # Validation
         total_classifier_val_loss = 0.0
-        total_autoEncoder_val_loss = 0.0
         encoder.eval()
-        decoder.eval()
         classifier.eval()
 
         for inputs, labels in val_dataLoader:
@@ -320,15 +448,12 @@ def train_model(processed_csv_path: str, dataset_name: str, positive_label_value
 
             # -- Auto-Encoder --
             encoded_representation = encoder(inputs)
-            reconstructed_output = decoder(encoded_representation)
 
-            outputs = classifier(reconstructed_output)
+            outputs = classifier(encoded_representation)
 
             # Calcolo delle loss
-            loss_autoEncoder = criterion_autoEncoder(reconstructed_output, inputs)
             loss_classification = criterion_classification(outputs, labels)
 
-            total_autoEncoder_val_loss += loss_autoEncoder.item()
             total_classifier_val_loss += loss_classification.item()
 
             # Applico la sigmoide per convertire in probabilità
@@ -347,9 +472,7 @@ def train_model(processed_csv_path: str, dataset_name: str, positive_label_value
 
         # Calcolo le metriche
         avg_classifier_train_loss = total_classifier_train_loss/len(train_dataLoader)
-        avg_autoEncoder_train_loss = total_autoEncoder_train_loss/len(train_dataLoader)
         avg_classifier_val_loss = total_classifier_val_loss/len(val_dataLoader)
-        avg_autoEncoder_val_loss = total_autoEncoder_val_loss/len(val_dataLoader)
         f1 = f1_score(y_true_np, y_pred_np, pos_label=positive_label_value, average='binary', zero_division=0)
         precision = precision_score(y_true_np, y_pred_np, pos_label=positive_label_value, average='binary', zero_division=0)
         recall = recall_score(y_true_np, y_pred_np, pos_label=positive_label_value, average='binary', zero_division=0)
@@ -358,9 +481,7 @@ def train_model(processed_csv_path: str, dataset_name: str, positive_label_value
 
         print("\n====================")
         print(f"Epoch: {epoch+1}/{N_EPOCHS}")
-        print(f"Auto-Encoder Training Loss: {avg_autoEncoder_train_loss:.4f}")
         print(f"Classifier Training Loss: {avg_classifier_train_loss:.4f}")
-        print(f"Auto-Encoder Validation Loss: {avg_autoEncoder_val_loss:.4f} ")
         print(f"Classifier Validation Loss: {avg_classifier_val_loss:.4f} ")
         print(f"F1-score: {f1}")
         print(f"Precision: {precision}")
@@ -369,10 +490,8 @@ def train_model(processed_csv_path: str, dataset_name: str, positive_label_value
         print("====================\n")
 
         # Popolo il dizionario history
-        history['epoch'].append(epoch + 1)
-        history['autoEncoder_train_loss'].append(total_autoEncoder_train_loss/len(train_dataLoader))
+        history['epochClassifier'].append(epoch + 1)
         history['classifier_train_loss'].append(total_classifier_train_loss/len(train_dataLoader))
-        history['autoEncoder_val_loss'].append(total_autoEncoder_val_loss/len(val_dataLoader))
         history['classifier_val_loss'].append(total_classifier_train_loss/len(train_dataLoader)) 
         history['val_f1'].append(f1); 
         history['val_precision'].append(precision)
@@ -384,28 +503,28 @@ def train_model(processed_csv_path: str, dataset_name: str, positive_label_value
         current_metric_to_check = 0.0
         if early_stopping_metric == 'val_loss':
             current_metric_to_check = avg_classifier_val_loss
-            improved = (best_metric_val - current_metric_to_check) > early_stopping_min_delta
+            improved = (classifier_best_metric_val - current_metric_to_check) > early_stopping_min_delta
         elif early_stopping_metric == 'val_f1':
             current_metric_to_check = f1
-            improved = (current_metric_to_check - best_metric_val) > early_stopping_min_delta
+            improved = (current_metric_to_check - classifier_best_metric_val) > early_stopping_min_delta
         elif early_stopping_metric == 'val_pr_auc':
             current_metric_to_check = pr_auc
-            improved = (current_metric_to_check - best_metric_val) > early_stopping_min_delta
+            improved = (current_metric_to_check - classifier_best_metric_val) > early_stopping_min_delta
         elif early_stopping_metric == 'val_precision':
             current_metric_to_check = precision
-            improved = (current_metric_to_check - best_metric_val) > early_stopping_min_delta
+            improved = (current_metric_to_check - classifier_best_metric_val) > early_stopping_min_delta
         elif early_stopping_metric == 'val_recall':
             current_metric_to_check = recall
-            improved = (current_metric_to_check - best_metric_val) > early_stopping_min_delta
+            improved = (current_metric_to_check - classifier_best_metric_val) > early_stopping_min_delta
         else: # Default a val_loss se la metrica non è riconosciuta
             logging.warning(f"Unknown early_stopping_metric: {early_stopping_metric}. Defaulting to val_loss.")
             current_metric_to_check = avg_classifier_val_loss
-            improved = (best_metric_val - current_metric_to_check) > early_stopping_min_delta
+            improved = (classifier_best_metric_val - current_metric_to_check) > early_stopping_min_delta
             early_stopping_metric = 'classifier_val_loss' # Aggiorna per coerenza nel logging
 
 
         if improved:
-            best_metric_val = current_metric_to_check
+            classifier_best_metric_val = current_metric_to_check
             epochs_no_improve = 0
             model_checkpoint = { 
                 'dropout_rate': classifierDropout, 
@@ -414,35 +533,43 @@ def train_model(processed_csv_path: str, dataset_name: str, positive_label_value
                 'input_dim': classifierInput_dim,
                 'model_state_dict': classifier.state_dict()
             }
-            torch.save(model_checkpoint, save_path)
-            logging.info(f"Epoch {epoch+1}: {early_stopping_metric} improved to {best_metric_val:.4f}. Model saved to {save_path}")
+            torch.save(model_checkpoint, Classifier_save_path)
+            logging.info(f"Epoch {epoch+1}: {early_stopping_metric} improved to {classifier_best_metric_val:.4f}. Model saved to {Classifier_save_path}")
         else:
             epochs_no_improve += 1
-            logging.info(f"Epoch {epoch+1}: {early_stopping_metric} did not improve from {best_metric_val:.4f}. Patience: {epochs_no_improve}/{early_stopping_patience}")
+            logging.info(f"Epoch {epoch+1}: {early_stopping_metric} did not improve from {classifier_best_metric_val:.4f}. Patience: {epochs_no_improve}/{early_stopping_patience}")
 
         if epochs_no_improve >= early_stopping_patience:
-            logging.info(f"Early stopping triggered after {epoch+1} epochs. Best {early_stopping_metric}: {best_metric_val:.4f}")
+            logging.info(f"Early stopping triggered after {epoch+1} epochs. Best {early_stopping_metric}: {classifier_best_metric_val:.4f}")
             break # Esce dal loop delle epoche
 
     # --- SEZIONE GRAFICI ---
-    # 1. Grafico Training Loss vs Validation Loss
+    # 1. Grafico Training Loss vs Validation Loss (Auto-Encoder)
     plt.figure(figsize=(10, 6))
-    plt.plot(history['epoch'], history['autoEncoder_train_loss'], label='Auto-Encoder Training Loss', marker='o')
-    plt.plot(history['epoch'], history['classifier_train_loss'], label='Classifier Training Loss', marker='o')
-    plt.plot(history['epoch'], history['autoEncoder_val_loss'], label='Auto-Encoder Validation Loss', marker='o')
-    plt.plot(history['epoch'], history['classifier_val_loss'], label='Classifier Validation Loss', marker='o')
-    plt.title(f'Classifier and Auto-Encoder Training & Validation Loss Over Epochs ({dataset_name})')
+    plt.plot(history['epochAutoEncoder'], history['autoEncoder_train_loss'], label='Auto-Encoder Training Loss', marker='o')
+    plt.plot(history['epochAutoEncoder'], history['autoEncoder_val_loss'], label='Auto-Encoder Validation Loss', marker='o')
+    plt.title(f'Auto-Encoder Training & Validation Loss Over Epochs ({dataset_name})')
     plt.xlabel('Epoch'); plt.ylabel('Loss'); plt.legend(); plt.grid(True)
-    plt.savefig(os.path.join(plots_dir_train, f'loss_curve_{dataset_name}.png'))
+    plt.savefig(os.path.join(plots_dir_train, f'AutoEncoder_loss_curve_{dataset_name}.png'))
     plt.close()
-    logging.info(f"Loss curve plot saved to {os.path.join(plots_dir_train, f'loss_curve_{dataset_name}.png')}")
+    logging.info(f"Loss curve plot saved to {os.path.join(plots_dir_train, f'AutoEncoder_loss_curve_{dataset_name}.png')}")
+
+    # 1. Grafico Training Loss vs Validation Loss (Classificatore)
+    plt.figure(figsize=(10, 6))
+    plt.plot(history['epochClassifier'], history['classifier_train_loss'], label='Classifier Training Loss', marker='o')
+    plt.plot(history['epochClassifier'], history['classifier_val_loss'], label='Classifier Validation Loss', marker='o')
+    plt.title(f'Classifier Training & Validation Loss Over Epochs ({dataset_name})')
+    plt.xlabel('Epoch'); plt.ylabel('Loss'); plt.legend(); plt.grid(True)
+    plt.savefig(os.path.join(plots_dir_train, f'Classifier_loss_curve_{dataset_name}.png'))
+    plt.close()
+    logging.info(f"Loss curve plot saved to {os.path.join(plots_dir_train, f'Classifier_loss_curve_{dataset_name}.png')}")
 
     # 2. Grafico Metriche di Validazione (F1, PR AUC, Precision, Recall)
     plt.figure(figsize=(12, 7))
-    plt.plot(history['epoch'], history['val_f1'], label='Validation F1-Score', marker='s')
-    plt.plot(history['epoch'], history['val_pr_auc'], label='Validation PR AUC', marker='^')
-    plt.plot(history['epoch'], history['val_precision'], label='Validation Precision', marker='.')
-    plt.plot(history['epoch'], history['val_recall'], label='Validation Recall', marker='.')
+    plt.plot(history['epochClassifier'], history['val_f1'], label='Validation F1-Score', marker='s')
+    plt.plot(history['epochClassifier'], history['val_pr_auc'], label='Validation PR AUC', marker='^')
+    plt.plot(history['epochClassifier'], history['val_precision'], label='Validation Precision', marker='.')
+    plt.plot(history['epochClassifier'], history['val_recall'], label='Validation Recall', marker='.')
     plt.title(f'Validation Metrics Over Epochs ({dataset_name})')
     plt.xlabel('Epoch'); plt.ylabel('Score'); plt.legend(); plt.grid(True); plt.ylim(0,1.05)
     plt.savefig(os.path.join(plots_dir_train, f'validation_metrics_curve_{dataset_name}.png'))
