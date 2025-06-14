@@ -318,7 +318,7 @@ def train_model(processed_csv_path: str, dataset_name: str, positive_label_value
                 'model_state_dict': encoder.state_dict()
             }
             torch.save(model_checkpoint, Encoder_save_path)
-            logging.info(f"Epoch {epoch+1}: val_loss improved to {AutoEncoder_best_metric_val:.4f}. Model saved to {Encoder_save_path}")
+            logging.info(f"Epoch {epoch+1}: val_loss improved to {AutoEncoder_best_metric_val:.4f}. Encoder saved to {Encoder_save_path}")
         else:
             epochs_no_improve += 1
             logging.info(f"Epoch {epoch+1}: val_loss did not improve from {AutoEncoder_best_metric_val:.4f}. Patience: {epochs_no_improve}/{early_stopping_patience}")
@@ -418,7 +418,7 @@ def train_model(processed_csv_path: str, dataset_name: str, positive_label_value
             encoded_representation = encoder(inputs)
 
             # Passo l'output dell'encoder al modello
-            outputs = classifier(reconstructed_output)
+            outputs = classifier(encoded_representation)
 
             # Calcolo della loss
             loss_classification=criterion_classification(outputs, labels)
