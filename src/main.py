@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 
 
 def prepare_data(input_path: str, output_path: str, dataset_name: str):
+
     logger.info("Preparing data...")
 
     # Carico la configurazione dal JSON
@@ -47,6 +48,17 @@ def prepare_data(input_path: str, output_path: str, dataset_name: str):
 
     # Leggo il DataFrame da un file csv
     df = pd.read_csv(input_path) 
+
+    # Divido il DataFrame
+    train_ratio = 0.9
+    train_df, test_df = train_test_split(df, test_size=(1 - train_ratio), random_state=None)
+
+    # RESET DEGLI INDICI - IMPORTANTE!
+    train_df = train_df.reset_index(drop=True)
+    test_df = test_df.reset_index(drop=True)
+
+    numeric_columns = [col for col in numeric_columns if col in train_df.columns]
+    categorical_columns = [col for col in categorical_columns if col in train_df.columns]
     
     # Pipeline per le feature numeriche
     # CustomImputer mi permette di gestire i valori NaN e infiniti
@@ -55,15 +67,15 @@ def prepare_data(input_path: str, output_path: str, dataset_name: str):
     num_pipeline = Pipeline([
         ("Impute", CustomImputer()),
         ("Scaling", LogMinMaxScaler()),
-        ("ToDataFrame", ArrayToDataFrame()),  # ← step intermedio
-        ("Binning", CustomBinner(method="Uniform"))
+      #  ("ToDataFrame", ArrayToDataFrame()),  # ← step intermedio
+       # ("Binning", CustomBinner(method="Quantile"))
     ])
 
     # Pipeline per le feature categoriche 
     # FrequencyEncoder mappa i valori delle feature categoriche a un valore in base alla loro frequenza
     # OneHotEncoder crea una colonna per ogni valore della feature 
     cat_pipeline = Pipeline([
-        ("FrequencyEncoder", FrequencyEncoder(soglia=0.5)),
+        ("FrequencyEncoder", FrequencyEncoder(soglia=0.005)),
         ("1hot", OneHotEncoder(sparse_output = False)),
     ])
 
@@ -73,9 +85,10 @@ def prepare_data(input_path: str, output_path: str, dataset_name: str):
         ("cat", cat_pipeline, categorical_columns),
     ])
 
+    preProcessing.fit(train_df)
     # Dataset processato
-    df_prepared = preProcessing.fit_transform(df)
-    
+    df_train_prepared = preProcessing.transform(train_df)
+
     # Rimetto i nomi delle feature che si sono persi nel processing
 
     # Genero i nomi delle colonne categoriche (ottenuti tramite get_feature_names_out)
@@ -85,19 +98,25 @@ def prepare_data(input_path: str, output_path: str, dataset_name: str):
     all_columns = numeric_columns + list(one_hot_column_names)
 
     # Crea il DataFrame con i nomi delle colonne
-    df_prepared_df = pd.DataFrame(df_prepared, columns=all_columns)
-
-    train_ratio = 0.9
+    df_prepared_df_train = pd.DataFrame(df_train_prepared, columns=all_columns)
 
     # Aggiungo la colonna target al DataFrame processato
-    df_prepared_df[target_column] = df[target_column]
+    df_prepared_df_train[target_column] = train_df[target_column]
 
-    # Suddivido il dataset in sottogruppi 
-    train_df, test_df = train_test_split(df_prepared_df, test_size=(1 - train_ratio), random_state=None)
+    df_test_prepared = preProcessing.transform(test_df)
+
+    # Combino i nomi delle colonne numeriche e quelle generate dal OneHotEncoder
+    all_columns = numeric_columns + list(one_hot_column_names)
+
+    # Crea il DataFrame con i nomi delle colonne
+    df_prepared_df_test = pd.DataFrame(df_test_prepared, columns=all_columns)
+
+    # Aggiungo la colonna target al DataFrame processato
+    df_prepared_df_test[target_column] = test_df[target_column]
 
     if output_path!=None:
-        train_df.to_csv(output_path + "_Train.csv", index=False)
-        test_df.to_csv(output_path + "_Test.csv", index=False)
+        df_prepared_df_train.to_csv(output_path + "_Train.csv", index=False)
+        df_prepared_df_test.to_csv(output_path + "_Test.csv", index=False)
         logging.info("Saved Datasets")
 
 def self_supervised_train_model(processed_csv_path: str, dataset_name: str, positive_label_value: int, plots_dir_train: str , early_stopping_metric: str, model_config: str):
@@ -202,7 +221,7 @@ def self_supervised_train_model(processed_csv_path: str, dataset_name: str, posi
     
     # Definisco il training Loop
     # Numero di epoche
-    N_EPOCHS = 100
+    N_EPOCHS = 1000
  
     history = {
         'epochAutoEncoder': [],
@@ -485,7 +504,7 @@ def self_supervised_train_model(processed_csv_path: str, dataset_name: str, posi
         y_pred_np = np.array(all_predictions)
 
         # Calcolo le metriche
-        avg_classifier_train_loss = total_classifier_train_loss/len(train_dataLoader)
+        avg_classifier_train_loss = total_classifier_train_loss/len(limited_train_dataLoader)
         avg_classifier_val_loss = total_classifier_val_loss/len(val_dataLoader)
         f1 = f1_score(y_true_np, y_pred_np, pos_label=positive_label_value, average='binary', zero_division=0)
         precision = precision_score(y_true_np, y_pred_np, pos_label=positive_label_value, average='binary', zero_division=0)
@@ -505,8 +524,8 @@ def self_supervised_train_model(processed_csv_path: str, dataset_name: str, posi
 
         # Popolo il dizionario history
         history['epochClassifier'].append(epoch + 1)
-        history['classifier_train_loss'].append(total_classifier_train_loss/len(train_dataLoader))
-        history['classifier_val_loss'].append(total_classifier_val_loss/len(train_dataLoader)) 
+        history['classifier_train_loss'].append(avg_classifier_train_loss)
+        history['classifier_val_loss'].append(avg_classifier_val_loss) 
         history['val_f1'].append(f1); 
         history['val_precision'].append(precision)
         history['val_recall'].append(recall); 
@@ -672,7 +691,7 @@ def supervised_train_model(processed_csv_path: str, dataset_name: str, positive_
     
     # Definisco il training Loop
     # Numero di epoche
-    N_EPOCHS = 100
+    N_EPOCHS = 1000
  
     history = {
         'epochClassifier': [],
@@ -828,8 +847,8 @@ def supervised_train_model(processed_csv_path: str, dataset_name: str, positive_
 
         # Popolo il dizionario history
         history['epochClassifier'].append(epoch + 1)
-        history['classifier_train_loss'].append(total_classifier_train_loss/len(train_dataLoader))
-        history['classifier_val_loss'].append(total_classifier_val_loss/len(train_dataLoader)) 
+        history['classifier_train_loss'].append(avg_classifier_train_loss)
+        history['classifier_val_loss'].append(avg_classifier_val_loss) 
         history['val_f1'].append(f1); 
         history['val_precision'].append(precision)
         history['val_recall'].append(recall); 

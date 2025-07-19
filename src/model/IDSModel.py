@@ -14,6 +14,7 @@ class IDSModel(nn.Module):
 
         # Creo i layer in base a quello che ho impostato nel file json
         layers=[]
+        unit = input_dim
         for i, unit in enumerate(hidden_layers):
             layers.append(nn.Linear(input_dim, unit))
             layers.append(nn.LayerNorm(unit))

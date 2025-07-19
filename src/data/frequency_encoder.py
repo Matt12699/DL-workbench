@@ -19,7 +19,7 @@ class FrequencyEncoder(BaseEstimator, TransformerMixin):
             top_categories = freq_map[freq_map >= self.soglia]
 
             # Ordino le categorie per frequenza decrescente
-            sorted_categories = top_categories.sort_values(ascending=False)
+            sorted_categories = top_categories.sort_values(ascending=False).iloc[:32]
             
             # Mappo i valori che passano la soglia con un indice unico
             # Assegno un valore numerico per ogni categoria, creando un dizionario formato da valore categorico: valore intero
