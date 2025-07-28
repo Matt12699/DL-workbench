@@ -27,6 +27,9 @@ from torch.utils.data import Subset
 from torch import optim
 from torch import nn
 from model.IDSModel import IDSModel
+from model.AutoEncoder import AutoEncoder
+from data.Augmentation import Augmentation
+from Loss.SupConLoss import SupConLoss
 
 setup_logging()
 logger = logging.getLogger(__name__)
@@ -76,7 +79,10 @@ def prepare_data(input_path: str, output_path: str, dataset_name: str):
     # OneHotEncoder crea una colonna per ogni valore della feature 
     cat_pipeline = Pipeline([
         ("FrequencyEncoder", FrequencyEncoder(soglia=0.005)),
-        ("1hot", OneHotEncoder(sparse_output = False)),
+        ("1hot", OneHotEncoder(# categories=[list(range(21)) for _ in categorical_columns],
+                               # handle_unknown="ignore",
+                               sparse_output=False
+                               )),
     ])
 
     # ColumnTransformer prende tutte le colonne e fa le trasformazioni giuste su feature numeriche e categoriche
@@ -86,6 +92,7 @@ def prepare_data(input_path: str, output_path: str, dataset_name: str):
     ])
 
     preProcessing.fit(train_df)
+
     # Dataset processato
     df_train_prepared = preProcessing.transform(train_df)
 
@@ -119,7 +126,236 @@ def prepare_data(input_path: str, output_path: str, dataset_name: str):
         df_prepared_df_test.to_csv(output_path + "_Test.csv", index=False)
         logging.info("Saved Datasets")
 
-def self_supervised_train_model(processed_csv_path: str, dataset_name: str, positive_label_value: int, plots_dir_train: str , early_stopping_metric: str, model_config: str):
+def autoEncoder_train(processed_csv_path: str, dataset_name: str, positive_label_value: int, plots_dir_train: str , model_config: str):
+
+    logging.info("Training model...")
+
+    if positive_label_value == None:
+        positive_label_value=1
+
+    if plots_dir_train == None:
+        plots_dir_train = "plots\Self-Sup_Training_progress"
+
+    if model_config == None:
+        model_config = 'small'
+
+    # Creo la directory per i plot se non esiste
+    if not os.path.exists(plots_dir_train):
+        os.makedirs(plots_dir_train)
+        logging.info(f"Created directory for plots: {plots_dir_train}")
+    
+
+    # Carico la configurazione del dataset dal JSON
+    config_path= "config/dataset.json"
+    config_manager = ConfigManager()
+    config_manager.load_config(config_path)
+
+    target_column = config_manager.get_value(dataset_name, "target_column")
+
+    full_dataset = CSVTabularDataset(processed_csv_path, target_column=target_column)
+
+    # Ottengo il numero di feature dal dataset 
+    num_features = full_dataset.X.shape[1]
+
+    # Carico la configurazione degli iperparametri dal JSON
+    config_path= "config/hyperparameters.json"
+    config_manager.load_config(config_path)
+    encoder_config = config_manager.get_value(model_config, "encoder")
+    decoder_config = config_manager.get_value(model_config, "decoder")
+
+    learningRate = config_manager.get_value(model_config, "lr")
+
+    encoderDropout = encoder_config["dropout"]
+    encoderHidden_layers = encoder_config["hidden_layers"]
+
+    decoderDropout = decoder_config["dropout"]
+    decoderHidden_layers = decoder_config["hidden_layers"]
+
+    # Stabilisco input e output
+    
+    encoderInput_dim = num_features
+    encoderOutput_dim = encoder_config["output_dim"]
+
+    # Suddivido il dataset creandone uno con un numero di dati etichettati limitato
+
+    train_ratio = 0.9
+
+    n_total = len(full_dataset)
+    n_train = int (train_ratio * n_total)
+    n_val = n_total - n_train
+
+    train_indices = list(range(n_train))
+    val_indices = list(range(n_train, n_train + n_val))
+    
+    # Suddivido il dataset in due sottogruppi in modo deterministico
+    train_dataset = Subset(full_dataset, train_indices)
+    val_dataset = Subset(full_dataset, val_indices) 
+
+    # Divido i campioni in batch
+    train_dataLoader = DataLoader(train_dataset, batch_size=64, shuffle=True)
+    val_dataLoader = DataLoader(val_dataset, batch_size=64, shuffle=False)
+
+    # Selezioniamo il dispositivo da usare: GPU, CPU...
+    device = torch.accelerator.current_accelerator().type if torch.accelerator.is_available() else "cpu"
+    logging.info(f"Using device: {device}")
+
+    # Creo i modelli
+    autoEncoder = AutoEncoder(encoder_dropout=encoderDropout, decoder_dropout=decoderDropout, encoder_layers=encoderHidden_layers, decoder_layers= decoderHidden_layers, input_dim=encoderInput_dim, latent_dim=encoderOutput_dim).to(device)
+
+    # Loss per imparare a astrarre l'input
+    criterion_autoEncoder = SupConLoss()
+    
+    # Definisco il training Loop
+    # Numero di epoche
+    N_EPOCHS = 100000
+ 
+    history = {
+        'epochAutoEncoder': [],
+        'autoEncoder_train_loss':[],
+        'autoEncoder_val_loss': []
+    }  
+    
+
+    # Parametri per Early Stopping
+    early_stopping_patience = 25
+    early_stopping_min_delta = 0.001 # Miglioramento minimo per considerarlo tale
+
+    # --- Inizializzazione Variabili per Early Stopping e Model Checkpointing ---
+    AutoEncoder_best_metric_val = float('inf') 
+    epochs_no_improve = 0
+
+    Encoder_save_path = r"src\model\trained_encoder.pth"
+
+    encoder_save_dir = os.path.dirname(Encoder_save_path)
+    if not os.path.exists(encoder_save_dir):
+        os.makedirs(encoder_save_dir)
+        logging.info(f"Created directory for encoder: {Encoder_save_path}")
+    
+    logging.info(f"AutoEncoder Early stopping enabled: monitoring 'val_loss', patience={early_stopping_patience}, min_delta={early_stopping_min_delta}")
+    logging.info(f"Best model will be saved to: {Encoder_save_path}")
+
+    # Algoritmo di ottimizzazione per autoEncoder
+    optimizer = optim.Adam(autoEncoder.parameters(),
+                          lr=learningRate)
+    
+    logging.info("Auto-Encoder training is starting")
+
+    augment = Augmentation()
+
+    # Training Auto-Encoder
+    for epoch in range(N_EPOCHS):
+
+        # Per ogni epoca capiamo quanta è la loss
+        total_autoEncoder_train_loss= 0.0
+        autoEncoder.train()
+        for input, label in train_dataLoader:
+
+            if len(torch.unique(label)) < 2:
+               continue  # Salta la batch se contiene solo una classe
+
+            # Sposta input alla GPU se disponibile
+            input = input.to(device)
+            label = label.to(device)
+
+            # Azzero i gradienti accumulati dai passsaggi precedenti
+            # Serve a far si che l'ottimizzatore aggiorni i parametri del modello correttamente
+            optimizer.zero_grad()
+
+            input_i = augment(input)
+            input_j = augment(input)
+
+            output_i = autoEncoder.encode(input_i)
+            output_j = autoEncoder.encode(input_j)
+
+            z = torch.cat([output_i, output_j], dim=0)
+            y = torch.cat([label, label], dim=0)
+
+            loss_autoEncoder = criterion_autoEncoder(z, y)
+
+            # Backpropagation: calcolo i gradienti
+            loss_autoEncoder.backward()
+
+            # Aggiusto i parametri basati sui gradienti
+            optimizer.step()
+
+            total_autoEncoder_train_loss += loss_autoEncoder.item()
+
+        # Validation Auto-Encoder
+        total_autoEncoder_val_loss = 0.0
+        autoEncoder.eval()
+    
+
+        for input, label in val_dataLoader:
+
+            if len(torch.unique(label)) < 2:
+               continue  # Salta la batch se contiene solo una classe
+
+            input = input.to(device)
+
+            # Due forward pass (simulano augmentazioni deboli)
+            output_i = autoEncoder.encode(input)
+            output_j = autoEncoder.encode(input)
+
+            features = torch.cat([output_i, output_j], dim=0)  # [2B, D]
+            labels = torch.cat([label, label], dim=0)          # [2B]
+
+            loss_autoEncoder = criterion_autoEncoder(features, labels)
+
+            total_autoEncoder_val_loss += loss_autoEncoder.item()
+
+        # Calcolo le metriche dell'Auto-Encoder
+        avg_autoEncoder_train_loss = total_autoEncoder_train_loss/len(train_dataLoader)
+        avg_autoEncoder_val_loss = total_autoEncoder_val_loss/len(val_dataLoader)
+
+        print("\n====================")
+        print(f"Epoch: {epoch+1}/{N_EPOCHS}")
+        print(f"Auto-Encoder Training Loss: {avg_autoEncoder_train_loss:.4f}")
+        print(f"Auto-Encoder Validation Loss: {avg_autoEncoder_val_loss:.4f} ")
+        print("====================\n")
+
+        # Popolo il dizionario history per quanto riguarda l'autoEncoder
+        history['epochAutoEncoder'].append(epoch + 1)
+        history['autoEncoder_train_loss'].append(total_autoEncoder_train_loss/len(train_dataLoader))
+        history['autoEncoder_val_loss'].append(total_autoEncoder_val_loss/len(val_dataLoader))
+
+        # --- Logica di Early Stopping e Model Checkpointing ---
+        current_metric_to_check = avg_autoEncoder_val_loss
+        improved = (AutoEncoder_best_metric_val - current_metric_to_check) > early_stopping_min_delta
+
+
+        if improved:
+            AutoEncoder_best_metric_val = current_metric_to_check
+            epochs_no_improve = 0
+            model_checkpoint = { 
+                'dropout_rate': encoderDropout, 
+                'hidden_layers_config': encoderHidden_layers,
+                'output_dim': encoderOutput_dim, 
+                'input_dim': encoderInput_dim,
+                'model_state_dict': autoEncoder.encoder.state_dict()
+            }
+            torch.save(model_checkpoint, Encoder_save_path)
+            logging.info(f"Epoch {epoch+1}: val_loss improved to {AutoEncoder_best_metric_val:.4f}. Encoder saved to {Encoder_save_path}")
+        else:
+            epochs_no_improve += 1
+            logging.info(f"Epoch {epoch+1}: val_loss did not improve from {AutoEncoder_best_metric_val:.4f}. Patience: {epochs_no_improve}/{early_stopping_patience}")
+
+        if epochs_no_improve >= early_stopping_patience:
+            logging.info(f"Early stopping triggered after {epoch+1} epochs. Best validation loss: {AutoEncoder_best_metric_val:.4f}")
+            break # Esce dal loop delle epoche
+    
+
+    # --- SEZIONE GRAFICI ---
+    # 1. Grafico Training Loss vs Validation Loss (Auto-Encoder)
+    plt.figure(figsize=(10, 6))
+    plt.plot(history['epochAutoEncoder'], history['autoEncoder_train_loss'], label='Auto-Encoder Training Loss', marker='o')
+    plt.plot(history['epochAutoEncoder'], history['autoEncoder_val_loss'], label='Auto-Encoder Validation Loss', marker='o')
+    plt.title(f'Auto-Encoder Training & Validation Loss Over Epochs ({dataset_name})')
+    plt.xlabel('Epoch'); plt.ylabel('Loss'); plt.legend(); plt.grid(True)
+    plt.savefig(os.path.join(plots_dir_train, f'AutoEncoder_loss_curve_{dataset_name}.png'))
+    plt.close()
+    logging.info(f"Loss curve plot saved to {os.path.join(plots_dir_train, f'AutoEncoder_loss_curve_{dataset_name}.png')}")
+
+def encoderClassifier_train(processed_csv_path: str, dataset_name: str, positive_label_value: int, plots_dir_train: str , early_stopping_metric: str, model_config: str, encoder_path:str):
 
     logging.info("Training model...")
 
@@ -156,30 +392,16 @@ def self_supervised_train_model(processed_csv_path: str, dataset_name: str, posi
     # Carico la configurazione degli iperparametri dal JSON
     config_path= "config/hyperparameters.json"
     config_manager.load_config(config_path)
-    encoder_config = config_manager.get_value(model_config, "encoder")
-    decoder_config = config_manager.get_value(model_config, "decoder")
     classifier_config = config_manager.get_value(model_config, "classifier")
 
     learningRate = config_manager.get_value(model_config, "lr")
-
-    encoderDropout = encoder_config["dropout"]
-    encoderHidden_layers = encoder_config["hidden_layers"]
-
-    decoderDropout = decoder_config["dropout"]
-    decoderHidden_layers = decoder_config["hidden_layers"]
 
     classifierDropout = classifier_config["dropout"]
     classifierHidden_layers = classifier_config["hidden_layers"]
 
     # Stabilisco input e output
-    
-    encoderInput_dim = num_features
-    encoderOutput_dim = encoder_config["output_dim"]
 
-    decoderInput_dim = encoderOutput_dim
-    decoderOutput_dim = num_features
-
-    classifierInput_dim = encoderOutput_dim
+    classifierInput_dim = classifier_config["input_dim"]
     classifierOutput_dim = classifier_config["output_dim"]
 
     # Suddivido il dataset creandone uno con un numero di dati etichettati limitato
@@ -195,15 +417,29 @@ def self_supervised_train_model(processed_csv_path: str, dataset_name: str, posi
 
     labels_ratio = config_manager.get_value(model_config, "labels_ratio")
     n_train_limited = int(labels_ratio * n_train)
-    train_indices_limited = train_indices[:n_train_limited]
+
+    # Bilancia il sottoinsieme
+    X_train = full_dataset.X[train_indices]
+    y_train = full_dataset.y[train_indices]
+
+    class_0_indices = [i for i, y in enumerate(y_train) if y == 0]
+    class_1_indices = [i for i, y in enumerate(y_train) if y == 1]
+
+    samples_per_class = n_train_limited // 2
+    selected_0 = class_0_indices[:samples_per_class]
+    selected_1 = class_1_indices[:samples_per_class]
+
+    balanced_indices = selected_0 + selected_1
+
+    # Ricava gli indici originali riferiti al dataset completo
+    train_indices_limited = [train_indices[i] for i in balanced_indices]
+
     
     # Suddivido il dataset in due sottogruppi in modo deterministico
-    train_dataset = Subset(full_dataset, train_indices)
     limited_train_dataset = Subset(full_dataset, train_indices_limited)
     val_dataset = Subset(full_dataset, val_indices) 
 
     # Divido i campioni in batch
-    train_dataLoader = DataLoader(train_dataset, batch_size=64, shuffle=True)
     limited_train_dataLoader = DataLoader(limited_train_dataset, batch_size=64, shuffle=True)
     val_dataLoader = DataLoader(val_dataset, batch_size=64, shuffle=False)
 
@@ -212,23 +448,16 @@ def self_supervised_train_model(processed_csv_path: str, dataset_name: str, posi
     logging.info(f"Using device: {device}")
 
     # Creo i modelli
-    encoder = IDSModel(dropout=encoderDropout, hidden_layers=encoderHidden_layers, input_dim=encoderInput_dim, output_dim=encoderOutput_dim).to(device)
-    decoder = IDSModel(dropout=decoderDropout, hidden_layers=decoderHidden_layers, input_dim=decoderInput_dim ,output_dim=decoderOutput_dim).to(device)
     classifier = IDSModel(dropout=classifierDropout, hidden_layers=classifierHidden_layers, input_dim=classifierInput_dim ,output_dim=classifierOutput_dim).to(device)
 
-    # Loss per capire la ricostruzione dell'input
-    criterion_autoEncoder = nn.MSELoss()
-    
     # Definisco il training Loop
     # Numero di epoche
-    N_EPOCHS = 1000
+    N_EPOCHS = 100000
  
     history = {
-        'epochAutoEncoder': [],
+
         'epochClassifier': [],
-        'autoEncoder_train_loss':[],
         'classifier_train_loss':[],
-        'autoEncoder_val_loss': [],
         'classifier_val_loss': [],
         'val_f1': [],
         'val_precision': [],
@@ -242,126 +471,19 @@ def self_supervised_train_model(processed_csv_path: str, dataset_name: str, posi
     early_stopping_min_delta = 0.0001 # Miglioramento minimo per considerarlo tale
 
     # --- Inizializzazione Variabili per Early Stopping e Model Checkpointing ---
-    AutoEncoder_best_metric_val = float('inf') 
     classifier_best_metric_val = -float('inf') if early_stopping_metric != 'val_loss' else float('inf')
     epochs_no_improve = 0
 
-    Encoder_save_path = r"src\model\trained_encoder.pth"
     Classifier_save_path = r"src\model\trained_model.pth"
 
     classifier_save_dir = os.path.dirname(Classifier_save_path)
     if not os.path.exists(classifier_save_dir):
         os.makedirs(classifier_save_dir)
         logging.info(f"Created directory for model: {Classifier_save_path}")
-
-    encoder_save_dir = os.path.dirname(Encoder_save_path)
-    if not os.path.exists(encoder_save_dir):
-        os.makedirs(encoder_save_dir)
-        logging.info(f"Created directory for encoder: {Encoder_save_path}")
-    
-    logging.info(f"AutoEncoder Early stopping enabled: monitoring 'val_loss', patience={early_stopping_patience}, min_delta={early_stopping_min_delta}")
-    logging.info(f"Best model will be saved to: {Encoder_save_path}")
-
-    # Definisco l'algoritmo di ottimizzazione per l'Auto-Encoder
-    params_AutoEncoder = list(encoder.parameters()) + list(decoder.parameters()) 
-
-    optimizer = optim.Adam(params_AutoEncoder,
-                          lr=learningRate)
-    
-    logging.info("Auto-Encoder training is starting")
-
-    # Training Auto-Encoder
-    for epoch in range(N_EPOCHS):
-
-        # Per ogni epoca capiamo quanta è la loss
-        total_autoEncoder_train_loss= 0.0
-        encoder.train()
-        decoder.train()
-        for inputs, _ in train_dataLoader:
-
-            # Sposta input alla GPU se disponibile
-            inputs = inputs.to(device)
-
-            # Azzero i gradienti accumulati dai passsaggi precedenti
-            # Serve a far si che l'ottimizzatore aggiorni i parametri del modello correttamente
-            optimizer.zero_grad()
-
-            # -- Auto-Encoder --
-            encoded_representation = encoder(inputs)
-            reconstructed_output = decoder(encoded_representation)
-
-            # Calcolo della loss
-            loss_autoEncoder = criterion_autoEncoder(reconstructed_output, inputs)
-
-            # Backpropagation: calcolo i gradienti
-            loss_autoEncoder.backward()
-
-            # Aggiusto i parametri basati sui gradienti
-            optimizer.step()
-
-            total_autoEncoder_train_loss += loss_autoEncoder.item()
-
-        # Validation Auto-Encoder
-        total_autoEncoder_val_loss = 0.0
-        encoder.eval()
-        decoder.eval()
-
-        for inputs, _ in val_dataLoader:
-
-            inputs = inputs.to(device)
-
-            # -- Auto-Encoder --
-            encoded_representation = encoder(inputs)
-            reconstructed_output = decoder(encoded_representation)
-
-            # Calcolo delle loss
-            loss_autoEncoder = criterion_autoEncoder(reconstructed_output, inputs)
-
-            total_autoEncoder_val_loss += loss_autoEncoder.item()
-
-        # Calcolo le metriche dell'Auto-Encoder
-        avg_autoEncoder_train_loss = total_autoEncoder_train_loss/len(train_dataLoader)
-        avg_autoEncoder_val_loss = total_autoEncoder_val_loss/len(val_dataLoader)
-
-        print("\n====================")
-        print(f"Epoch: {epoch+1}/{N_EPOCHS}")
-        print(f"Auto-Encoder Training Loss: {avg_autoEncoder_train_loss:.4f}")
-        print(f"Auto-Encoder Validation Loss: {avg_autoEncoder_val_loss:.4f} ")
-        print("====================\n")
-
-        # Popolo il dizionario history per quanto riguarda l'autoEncoder
-        history['epochAutoEncoder'].append(epoch + 1)
-        history['autoEncoder_train_loss'].append(total_autoEncoder_train_loss/len(train_dataLoader))
-        history['autoEncoder_val_loss'].append(total_autoEncoder_val_loss/len(val_dataLoader))
-
-        # --- Logica di Early Stopping e Model Checkpointing ---
-        current_metric_to_check = avg_autoEncoder_val_loss
-        improved = (AutoEncoder_best_metric_val - current_metric_to_check) > early_stopping_min_delta
-
-
-        if improved:
-            AutoEncoder_best_metric_val = current_metric_to_check
-            epochs_no_improve = 0
-            model_checkpoint = { 
-                'dropout_rate': encoderDropout, 
-                'hidden_layers_config': encoderHidden_layers,
-                'output_dim': encoderOutput_dim, 
-                'input_dim': encoderInput_dim,
-                'model_state_dict': encoder.state_dict()
-            }
-            torch.save(model_checkpoint, Encoder_save_path)
-            logging.info(f"Epoch {epoch+1}: val_loss improved to {AutoEncoder_best_metric_val:.4f}. Encoder saved to {Encoder_save_path}")
-        else:
-            epochs_no_improve += 1
-            logging.info(f"Epoch {epoch+1}: val_loss did not improve from {AutoEncoder_best_metric_val:.4f}. Patience: {epochs_no_improve}/{early_stopping_patience}")
-
-        if epochs_no_improve >= early_stopping_patience:
-            logging.info(f"Early stopping triggered after {epoch+1} epochs. Best {early_stopping_metric}: {AutoEncoder_best_metric_val:.4f}")
-            break # Esce dal loop delle epoche
     
     # Carico da file l'encoder migliore
     try:
-        checkpoint = torch.load(Encoder_save_path, map_location=device)
+        checkpoint = torch.load(encoder_path, map_location=device)
 
         # Estraggo i parametri di configurazione dal checkpoint
         dropout_rate_loaded = checkpoint['dropout_rate']
@@ -374,21 +496,22 @@ def self_supervised_train_model(processed_csv_path: str, dataset_name: str, posi
 
         # Carica i pesi
         encoder.load_state_dict(checkpoint['model_state_dict'])
-        logging.info(f"Encoder loaded successfully from checkpoint: {Encoder_save_path}")
+        logging.info(f"Encoder loaded successfully from checkpoint: {encoder_path}")
 
     except FileNotFoundError:
-        logging.warning(f"Error: Encoder file not found in: {Encoder_save_path}")
+        logging.warning(f"Error: Encoder file not found in: {encoder_path}")
         exit()
     except RuntimeError as e:
         logging.warning(f"Error during the encoder loading: {e}")
         exit()
 
+    # Il dataset è bilanciato quindi questa parte non serve
     # --- Calcolo pos_weight per BCEWithLogitsLoss ---
     # Raccolgo tutte le etichette dal DataLoader di training
 
     all_train_labels = []
     logging.info("Collecting labels from train_dataLoader...")
-    for _, labels_batch in train_dataLoader:
+    for _, labels_batch in limited_train_dataLoader:
         all_train_labels.append(labels_batch) # Aggiungi il tensore del batch alla lista
 
     # Concateno tutti i tensori dei batch in un unico tensore
@@ -428,12 +551,16 @@ def self_supervised_train_model(processed_csv_path: str, dataset_name: str, posi
     logging.info("Classification training is starting")
     logging.info(f"Currently using {len(limited_train_dataset)} labels")
 
+    # Freeze dei parametri dell encoder
+    # for param in encoder.parameters():
+      #  param.requires_grad = False
+
     # Training Encoder+Classificatore
     for epoch in range(N_EPOCHS):
 
         # Per ogni epoca capiamo quanta è la loss
         total_classifier_train_loss= 0.0
-        encoder.train()
+        encoder.eval()
         classifier.train()
 
         for inputs, labels in limited_train_dataLoader:
@@ -471,7 +598,7 @@ def self_supervised_train_model(processed_csv_path: str, dataset_name: str, posi
 
         # Validation
         total_classifier_val_loss = 0.0
-        encoder.eval()
+        
         classifier.eval()
 
         for inputs, labels in val_dataLoader:
@@ -577,15 +704,6 @@ def self_supervised_train_model(processed_csv_path: str, dataset_name: str, posi
             break # Esce dal loop delle epoche
 
     # --- SEZIONE GRAFICI ---
-    # 1. Grafico Training Loss vs Validation Loss (Auto-Encoder)
-    plt.figure(figsize=(10, 6))
-    plt.plot(history['epochAutoEncoder'], history['autoEncoder_train_loss'], label='Auto-Encoder Training Loss', marker='o')
-    plt.plot(history['epochAutoEncoder'], history['autoEncoder_val_loss'], label='Auto-Encoder Validation Loss', marker='o')
-    plt.title(f'Auto-Encoder Training & Validation Loss Over Epochs ({dataset_name})')
-    plt.xlabel('Epoch'); plt.ylabel('Loss'); plt.legend(); plt.grid(True)
-    plt.savefig(os.path.join(plots_dir_train, f'AutoEncoder_loss_curve_{dataset_name}.png'))
-    plt.close()
-    logging.info(f"Loss curve plot saved to {os.path.join(plots_dir_train, f'AutoEncoder_loss_curve_{dataset_name}.png')}")
 
     # 1. Grafico Training Loss vs Validation Loss (Classificatore)
     plt.figure(figsize=(10, 6))
@@ -671,7 +789,22 @@ def supervised_train_model(processed_csv_path: str, dataset_name: str, positive_
 
     labels_ratio = config_manager.get_value(model_config, "labels_ratio")
     n_train_limited = int(labels_ratio * n_train)
-    train_indices_limited = train_indices[:n_train_limited]
+
+    # Bilancia il sottoinsieme
+    X_train = full_dataset.X[train_indices]
+    y_train = full_dataset.y[train_indices]
+
+    class_0_indices = [i for i, y in enumerate(y_train) if y == 0]
+    class_1_indices = [i for i, y in enumerate(y_train) if y == 1]
+
+    samples_per_class = n_train_limited // 2
+    selected_0 = class_0_indices[:samples_per_class]
+    selected_1 = class_1_indices[:samples_per_class]
+
+    balanced_indices = selected_0 + selected_1
+
+    # Ricava gli indici originali riferiti al dataset completo
+    train_indices_limited = [train_indices[i] for i in balanced_indices]
     
     # Suddivido il dataset in due sottogruppi in modo deterministico
     train_dataset = Subset(full_dataset, train_indices_limited)
@@ -703,6 +836,7 @@ def supervised_train_model(processed_csv_path: str, dataset_name: str, positive_
         'val_pr_auc':[]
     }  
 
+    # Il dataset è bilanciato quindi questa parte non serve
     # --- Calcolo pos_weight per BCEWithLogitsLoss ---
     # Raccolgo tutte le etichette dal DataLoader di training
 
@@ -1358,9 +1492,15 @@ if __name__ == "__main__":
     )
 
     parser.register_subcommands(
-        "selfSupTrain",
-        ["--input", "--dataset", "--positiveLabel", "--plotsDir", "--earlyMetric", "--config"],
-        ["The input path for the processed data.", "The name of the dataset", "The value of the positive label", "The path for the plots", "The early stopping metric", "The name of the model configuration"],
+        "autoEncoderTrain",
+        ["--input", "--dataset", "--positiveLabel", "--plotsDir", "--config"],
+        ["The input path for the processed data.", "The name of the dataset", "The value of the positive label", "The path for the plots", "The name of the model configuration"],
+    )
+
+    parser.register_subcommands(
+        "encoderClassTrain",
+        ["--input", "--dataset", "--positiveLabel", "--plotsDir", "--earlyMetric", "--config", "--encoder"],
+        ["The input path for the processed data.", "The name of the dataset", "The value of the positive label", "The path for the plots", "The early stopping metric", "The name of the model configuration", "The path for the encoder"],
     )
 
     parser.register_subcommands(
@@ -1385,8 +1525,10 @@ if __name__ == "__main__":
 
     if args.subcommand == "prepare":
         prepare_data(args.input, args.output, args.dataset)
-    elif args.subcommand == "selfSupTrain":
-        self_supervised_train_model(args.input, args.dataset, args.positiveLabel, args.plotsDir, args.earlyMetric, args.config)
+    elif args.subcommand == "autoEncoderTrain":
+        autoEncoder_train(args.input, args.dataset, args.positiveLabel, args.plotsDir, args.config)
+    elif args.subcommand == "encoderClassTrain":
+        encoderClassifier_train(args.input, args.dataset, args.positiveLabel, args.plotsDir, args.earlyMetric, args.config, args.encoder)
     elif args.subcommand == "selfSupEvaluate":
         self_supervised_evaluate_model(args.encoder, args.model, args.input, args.dataset, args.positiveLabel, args.plotsDir)
     elif args.subcommand == "supTrain":
