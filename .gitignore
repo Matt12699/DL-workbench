@@ -1,6 +1,7 @@
 # Custom skipped files
 resources/
 plots/
+prova/
 
 ### Python ###
 # Byte-compiled / optimized / DLL files
