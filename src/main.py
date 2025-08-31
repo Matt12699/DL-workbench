@@ -694,25 +694,27 @@ def encoder_train(processed_csv_path: str, dataset_name: str, positive_label_val
     labels_ratio = config_manager.get_value(model_config, "labels_ratio")
     n_train_limited = int(labels_ratio * n_train)
 
-    # Bilancia il sottoinsieme
-    X_train = full_dataset.X[train_indices]
-    y_train = full_dataset.y[train_indices]
+    if labels_ratio!=1:
+        # Bilancia il sottoinsieme
+        X_train = full_dataset.X[train_indices]
+        y_train = full_dataset.y[train_indices]
 
-    # Prendo tutte le etichette positive e negative
-    class_0_indices = [i for i, y in enumerate(y_train) if y == 0]
-    class_1_indices = [i for i, y in enumerate(y_train) if y == 1]
+        # Prendo tutte le etichette positive e negative
+        class_0_indices = [i for i, y in enumerate(y_train) if y == 0]
+        class_1_indices = [i for i, y in enumerate(y_train) if y == 1]
 
-    # Prendo il numero "giusto" di etichette positive e negative
-    samples_per_class = n_train_limited // 2
-    selected_0 = class_0_indices[:samples_per_class]
-    selected_1 = class_1_indices[:samples_per_class]
+        # Prendo il numero "giusto" di etichette positive e negative
+        samples_per_class = n_train_limited // 2
+        selected_0 = class_0_indices[:samples_per_class]
+        selected_1 = class_1_indices[:samples_per_class]
 
-    # Unisco tutti gli indici
-    balanced_indices = selected_0 + selected_1
+        # Unisco tutti gli indici
+        balanced_indices = selected_0 + selected_1
 
-    # Ricavo gli indici originali riferiti al dataset completo
-    train_indices_limited = [train_indices[i] for i in balanced_indices]
-
+        # Ricavo gli indici originali riferiti al dataset completo
+        train_indices_limited = [train_indices[i] for i in balanced_indices]
+    else:
+        train_indices_limited = train_indices
     
     # Suddivido il dataset in due sottogruppi in modo deterministico
     limited_train_dataset = Subset(full_dataset, train_indices_limited)
@@ -947,21 +949,24 @@ def encoderClassifier_train(processed_csv_path: str, dataset_name: str, positive
     labels_ratio = config_manager.get_value(model_config, "labels_ratio")
     n_train_limited = int(labels_ratio * n_train)
 
-    # Bilancio il sottoinsieme
-    X_train = full_dataset.X[train_indices]
-    y_train = full_dataset.y[train_indices]
+    if labels_ratio!=1:
+        # Bilancio il sottoinsieme
+        X_train = full_dataset.X[train_indices]
+        y_train = full_dataset.y[train_indices]
 
-    class_0_indices = [i for i, y in enumerate(y_train) if y == 0]
-    class_1_indices = [i for i, y in enumerate(y_train) if y == 1]
+        class_0_indices = [i for i, y in enumerate(y_train) if y == 0]
+        class_1_indices = [i for i, y in enumerate(y_train) if y == 1]
 
-    samples_per_class = n_train_limited // 2
-    selected_0 = class_0_indices[:samples_per_class]
-    selected_1 = class_1_indices[:samples_per_class]
+        samples_per_class = n_train_limited // 2
+        selected_0 = class_0_indices[:samples_per_class]
+        selected_1 = class_1_indices[:samples_per_class]
 
-    balanced_indices = selected_0 + selected_1
+        balanced_indices = selected_0 + selected_1
 
-    # Ricava gli indici originali riferiti al dataset completo
-    train_indices_limited = [train_indices[i] for i in balanced_indices]
+        # Ricava gli indici originali riferiti al dataset completo
+        train_indices_limited = [train_indices[i] for i in balanced_indices]
+    else:
+        train_indices_limited=train_indices
 
     
     # Suddivido il dataset in due sottogruppi in modo deterministico
@@ -1491,10 +1496,6 @@ def semi_supervised_evaluate_model(encoder_path: str, model_path: str, processed
     except Exception as e:
         logging.error(f"Failed to save Precision-Recall curve plot: {e}")
     plt.close()
-
-    X = all_embeddings
-    X = StandardScaler().fit_transform(X)
-    X = normalize(X)  
     
     # 4. GRAFICO: t-SNE
     # t-SNE 16D → 2D
@@ -1510,7 +1511,7 @@ def semi_supervised_evaluate_model(encoder_path: str, model_path: str, processed
     random_state=42,
     verbose=1
     )
-    embeddings_2d = tsne.fit_transform(X)
+    embeddings_2d = tsne.fit_transform(all_embeddings)
 
     # Plot
     plt.figure(figsize=(8, 6))
@@ -1600,21 +1601,24 @@ def supervised_train_model(processed_csv_path: str, dataset_name: str, positive_
     labels_ratio = config_manager.get_value(model_config, "labels_ratio")
     n_train_limited = int(labels_ratio * n_train)
 
-    # Bilancia il sottoinsieme
-    X_train = full_dataset.X[train_indices]
-    y_train = full_dataset.y[train_indices]
+    if labels_ratio!=1:
+        # Bilancia il sottoinsieme
+        X_train = full_dataset.X[train_indices]
+        y_train = full_dataset.y[train_indices]
 
-    class_0_indices = [i for i, y in enumerate(y_train) if y == 0]
-    class_1_indices = [i for i, y in enumerate(y_train) if y == 1]
+        class_0_indices = [i for i, y in enumerate(y_train) if y == 0]
+        class_1_indices = [i for i, y in enumerate(y_train) if y == 1]
 
-    samples_per_class = n_train_limited // 2
-    selected_0 = class_0_indices[:samples_per_class]
-    selected_1 = class_1_indices[:samples_per_class]
+        samples_per_class = n_train_limited // 2
+        selected_0 = class_0_indices[:samples_per_class]
+        selected_1 = class_1_indices[:samples_per_class]
 
-    balanced_indices = selected_0 + selected_1
+        balanced_indices = selected_0 + selected_1
 
-    # Ricava gli indici originali riferiti al dataset completo
-    train_indices_limited = [train_indices[i] for i in balanced_indices]
+        # Ricava gli indici originali riferiti al dataset completo
+        train_indices_limited = [train_indices[i] for i in balanced_indices]
+    else:
+        train_indices_limited=train_indices
     
     # Suddivido il dataset in due sottogruppi in modo deterministico
     train_dataset = Subset(full_dataset, train_indices_limited)
@@ -2183,7 +2187,7 @@ def unsupervised_train_model(processed_csv_path: str, dataset_name: str, positiv
     train_indices = list(range(n_train))
     val_indices = list(range(n_train, n_train + n_val))
 
-    # Seleziono solo i campioni positivi
+    # Seleziono solo i campioni negativi
     X_train = full_dataset.X[train_indices]
     y_train = full_dataset.y[train_indices]
 
@@ -2283,7 +2287,7 @@ def unsupervised_train_model(processed_csv_path: str, dataset_name: str, positiv
 
         # Validation
         autoEncoder.eval()
-
+        total_autoEncoder_val_loss=0.0
         all_predictions = []
         all_true_labels = []
         reconstruction_errors = []
@@ -2303,7 +2307,7 @@ def unsupervised_train_model(processed_csv_path: str, dataset_name: str, positiv
 
             # Calcolo l'errore di ricostruzione per ogni esempio
             batch_errors = torch.mean((inputs - reconstructed_output) ** 2, dim=1)  
-            reconstruction_errors.extend(batch_errors.cpu().numpy())
+            reconstruction_errors.extend(batch_errors.detach().cpu().numpy())
 
             # Aggiungo le etichette vere del batch (convertite in NumPy, già su CPU)
             all_true_labels.extend(labels.cpu().numpy())
@@ -2382,27 +2386,17 @@ def unsupervised_train_model(processed_csv_path: str, dataset_name: str, positiv
     plt.xlabel('Epoch'); plt.ylabel('Loss'); plt.legend(); plt.grid(True)
     plt.savefig(os.path.join(plots_dir_train, f'AutoEncoder_loss_curve_{dataset_name}.png'))
     plt.close()
-    logging.info(f"Loss curve plot saved to {os.path.join(plots_dir_train, f'AutoEncoder_loss_curve_{dataset_name}.png')}")
-
-    # 1. Grafico Training Loss vs Validation Loss (Classificatore)
-    plt.figure(figsize=(10, 6))
-    plt.plot(history['epochClassifier'], history['classifier_train_loss'], label='Classifier Training Loss', marker='o')
-    plt.plot(history['epochClassifier'], history['classifier_val_loss'], label='Classifier Validation Loss', marker='o')
-    plt.title(f'Classifier Training & Validation Loss Over Epochs ({dataset_name})')
-    plt.xlabel('Epoch'); plt.ylabel('Loss'); plt.legend(); plt.grid(True)
-    plt.savefig(os.path.join(plots_dir_train, f'autoEncoder_semi_sup_Classifier_loss_curve_{dataset_name}.png'))
-    plt.close()
-    logging.info(f"Loss curve plot saved to {os.path.join(plots_dir_train, f'autoEncoder_semi_sup_Classifier_loss_curve_{dataset_name}.png')}")
+    logging.info(f"Loss curve plot saved to {os.path.join(plots_dir_train, f'unsup_loss_curve_{dataset_name}.png')}")
 
     # 2. Grafico Metriche di Validazione (F1, PR AUC, Precision, Recall)
     plt.figure(figsize=(12, 7))
-    plt.plot(history['epochClassifier'], history['val_f1'], label='Validation F1-Score', marker='s')
-    plt.plot(history['epochClassifier'], history['val_pr_auc'], label='Validation PR AUC', marker='^')
-    plt.plot(history['epochClassifier'], history['val_precision'], label='Validation Precision', marker='.')
-    plt.plot(history['epochClassifier'], history['val_recall'], label='Validation Recall', marker='.')
+    plt.plot(history['epochAutoEncoder'], history['val_f1'], label='Validation F1-Score', marker='s')
+    plt.plot(history['epochAutoEncoder'], history['val_pr_auc'], label='Validation PR AUC', marker='^')
+    plt.plot(history['epochAutoEncoder'], history['val_precision'], label='Validation Precision', marker='.')
+    plt.plot(history['epochAutoEncoder'], history['val_recall'], label='Validation Recall', marker='.')
     plt.title(f'Validation Metrics Over Epochs ({dataset_name})')
     plt.xlabel('Epoch'); plt.ylabel('Score'); plt.legend(); plt.grid(True); plt.ylim(0,1.05)
-    plt.savefig(os.path.join(plots_dir_train, f'autoEncoder_semi_sup_validation_metrics_curve_{dataset_name}.png'))
+    plt.savefig(os.path.join(plots_dir_train, f'unsup_validation_metrics_curve_{dataset_name}.png'))
     plt.close()
     logging.info(f"Validation metrics curve plot saved to {os.path.join(plots_dir_train, f'autoEncoder_semi_sup_validation_metrics_curve_{dataset_name}.png')}")
     
@@ -2443,7 +2437,7 @@ def unsupervised_evaluate_model(autoEncoder_path: str, processed_csv_path: str, 
 
     # Carico lo stato del modello
     try:
-        checkpoint = torch.load(autoEncoder_path, map_location=device)
+        checkpoint = torch.load(autoEncoder_path, map_location=device, weights_only=False)
 
         # Estraggo i parametri di configurazione dal checkpoint
         encoder_dropout_loaded = checkpoint['encoder_dropout']
@@ -2490,7 +2484,7 @@ def unsupervised_evaluate_model(autoEncoder_path: str, processed_csv_path: str, 
 
         # Calcolo l'errore di ricostruzione per ogni esempio
         batch_errors = torch.mean((x_test_batch - reconstructed_output) ** 2, dim=1)  
-        reconstruction_errors.extend(batch_errors.cpu().numpy())
+        reconstruction_errors.extend(batch_errors.detach().cpu().numpy())
 
         # Salviamo gli embeddings e le label vere per il plot
         all_embeddings.append(encoded_representation.detach().cpu().numpy())
@@ -2563,7 +2557,7 @@ def unsupervised_evaluate_model(autoEncoder_path: str, processed_csv_path: str, 
     plt.xlabel('Predicted Label')
 
     # Salvo il grafico
-    plot_filename = f"confusion_matrix_{dataset_name}.png"
+    plot_filename = f"unsup_confusion_matrix_{dataset_name}.png"
     plot_save_path = os.path.join(plots_dir, plot_filename)
     try:
         plt.savefig(plot_save_path)
@@ -2583,7 +2577,7 @@ def unsupervised_evaluate_model(autoEncoder_path: str, processed_csv_path: str, 
     for bar in bars: # Aggiunge il valore sopra ogni barra
         yval = bar.get_height()
         plt.text(bar.get_x() + bar.get_width()/2.0, yval + 0.01, f'{yval:.4f}', ha='center', va='bottom')
-    plot_metrics_filename = f"metrics_barchart_{dataset_name}.png"
+    plot_metrics_filename = f"unsup_metrics_barchart_{dataset_name}.png"
     plot_metrics_save_path = os.path.join(plots_dir, plot_metrics_filename)
     try:
         plt.savefig(plot_metrics_save_path)
@@ -2611,7 +2605,7 @@ def unsupervised_evaluate_model(autoEncoder_path: str, processed_csv_path: str, 
     plt.ylabel('Precision')
     plt.legend()
     plt.grid(True)
-    plot_pr_filename = f"precision_recall_curve_{dataset_name}.png"
+    plot_pr_filename = f"unsup_precision_recall_curve_{dataset_name}.png"
     plot_pr_save_path = os.path.join(plots_dir, plot_pr_filename)
     try:
         plt.savefig(plot_pr_save_path)
@@ -2619,10 +2613,6 @@ def unsupervised_evaluate_model(autoEncoder_path: str, processed_csv_path: str, 
     except Exception as e:
         logging.error(f"Failed to save Precision-Recall curve plot: {e}")
     plt.close()
-
-    X = all_embeddings
-    X = StandardScaler().fit_transform(X)
-    X = normalize(X)  
     
     # 4. GRAFICO: t-SNE
     # t-SNE 16D → 2D
@@ -2638,7 +2628,7 @@ def unsupervised_evaluate_model(autoEncoder_path: str, processed_csv_path: str, 
     random_state=42,
     verbose=1
     )
-    embeddings_2d = tsne.fit_transform(X)
+    embeddings_2d = tsne.fit_transform(all_embeddings)
 
     # Plot
     plt.figure(figsize=(8, 6))
@@ -2648,7 +2638,7 @@ def unsupervised_evaluate_model(autoEncoder_path: str, processed_csv_path: str, 
     plt.title("2D Representation of the embeddings (t-SNE)")
     plt.xlabel("t-SNE 1")
     plt.ylabel("t-SNE 2")
-    plot_tsne_filename = f"t-SNE_{dataset_name}.png"
+    plot_tsne_filename = f"unsup_t-SNE_{dataset_name}.png"
     plot_tsne_save_path = os.path.join(plots_dir, plot_tsne_filename)
     try:
         plt.savefig(plot_tsne_save_path)
@@ -2713,8 +2703,8 @@ if __name__ == "__main__":
 
     parser.register_subcommands(
         "unsupEvaluate",
-        ["--model", "--input", "--dataset", "--positiveLabel", "--plotsDir"],
-        ["The path for the processed model", "The input path for the processed data.", "The name of the dataset", "The value of the positive label", "The path for the plots"],
+        ["--autoEncoder", "--input", "--dataset", "--positiveLabel", "--plotsDir"],
+        ["The path for the trained autoencoder", "The input path for the processed data.", "The name of the dataset", "The value of the positive label", "The path for the plots"],
     )
 
     args = parser.parse_arguments(sys.argv[1:])
@@ -2734,9 +2724,9 @@ if __name__ == "__main__":
     elif args.subcommand == "supEvaluate":
         supervised_evaluate_model(args.model, args.input, args.dataset, args.positiveLabel, args.plotsDir)
     elif args.subcommand == "unsupTrain":
-        supervised_train_model(args.input, args.dataset, args.positiveLabel, args.plotsDir, args.earlyMetric, args.config)
+        unsupervised_train_model(args.input, args.dataset, args.positiveLabel, args.plotsDir, args.earlyMetric, args.config)
     elif args.subcommand == "unsupEvaluate":
-        supervised_evaluate_model(args.model, args.input, args.dataset, args.positiveLabel, args.plotsDir)
+        unsupervised_evaluate_model(args.autoEncoder, args.input, args.dataset, args.positiveLabel, args.plotsDir)
 
     
 
