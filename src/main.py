@@ -210,12 +210,34 @@ def semi_supervised_AutoEncoder_train_model(processed_csv_path: str, dataset_nam
 
     labels_ratio = config_manager.get_value(model_config, "labels_ratio")
     n_train_limited = int(labels_ratio * n_train)
+    
     train_indices_limited = train_indices[:n_train_limited]
     
     # Suddivido il dataset in due sottogruppi in modo deterministico
     train_dataset = Subset(full_dataset, train_indices)
-    limited_train_dataset = Subset(full_dataset, train_indices_limited)
     val_dataset = Subset(full_dataset, val_indices) 
+
+    if labels_ratio<=0.1:
+        # Bilancia il sottoinsieme
+        X_train = full_dataset.X[train_indices]
+        y_train = full_dataset.y[train_indices]
+
+        # Prendo tutte le etichette positive e negative
+        class_0_indices = [i for i, y in enumerate(y_train) if y == 0]
+        class_1_indices = [i for i, y in enumerate(y_train) if y == 1]
+
+        # Prendo il numero "giusto" di etichette positive e negative
+        samples_per_class = n_train_limited // 2
+        selected_0 = class_0_indices[:samples_per_class]
+        selected_1 = class_1_indices[:samples_per_class]
+
+        # Unisco tutti gli indici
+        balanced_indices = selected_0 + selected_1
+
+        # Ricavo gli indici originali riferiti al dataset completo
+        train_indices_limited = [train_indices[i] for i in balanced_indices]
+
+    limited_train_dataset = Subset(full_dataset, train_indices_limited)
 
     # Divido i campioni in batch
     train_dataLoader = DataLoader(train_dataset, batch_size=64, shuffle=True)
@@ -403,7 +425,7 @@ def semi_supervised_AutoEncoder_train_model(processed_csv_path: str, dataset_nam
 
     all_train_labels = []
     logging.info("Collecting labels from train_dataLoader...")
-    for _, labels_batch in train_dataLoader:
+    for _, labels_batch in limited_train_dataLoader:
         all_train_labels.append(labels_batch) # Aggiungi il tensore del batch alla lista
 
     # Concateno tutti i tensori dei batch in un unico tensore
@@ -693,8 +715,9 @@ def encoder_train(processed_csv_path: str, dataset_name: str, positive_label_val
 
     labels_ratio = config_manager.get_value(model_config, "labels_ratio")
     n_train_limited = int(labels_ratio * n_train)
+    train_indices_limited = train_indices[:n_train_limited]
 
-    if labels_ratio!=1:
+    if labels_ratio<=0.1:
         # Bilancia il sottoinsieme
         X_train = full_dataset.X[train_indices]
         y_train = full_dataset.y[train_indices]
@@ -713,8 +736,6 @@ def encoder_train(processed_csv_path: str, dataset_name: str, positive_label_val
 
         # Ricavo gli indici originali riferiti al dataset completo
         train_indices_limited = [train_indices[i] for i in balanced_indices]
-    else:
-        train_indices_limited = train_indices
     
     # Suddivido il dataset in due sottogruppi in modo deterministico
     limited_train_dataset = Subset(full_dataset, train_indices_limited)
@@ -948,8 +969,9 @@ def encoderClassifier_train(processed_csv_path: str, dataset_name: str, positive
 
     labels_ratio = config_manager.get_value(model_config, "labels_ratio")
     n_train_limited = int(labels_ratio * n_train)
+    train_indices_limited = train_indices[:n_train_limited]
 
-    if labels_ratio!=1:
+    if labels_ratio<=0.1:
         # Bilancio il sottoinsieme
         X_train = full_dataset.X[train_indices]
         y_train = full_dataset.y[train_indices]
@@ -965,8 +987,6 @@ def encoderClassifier_train(processed_csv_path: str, dataset_name: str, positive
 
         # Ricava gli indici originali riferiti al dataset completo
         train_indices_limited = [train_indices[i] for i in balanced_indices]
-    else:
-        train_indices_limited=train_indices
 
     
     # Suddivido il dataset in due sottogruppi in modo deterministico
@@ -1600,8 +1620,9 @@ def supervised_train_model(processed_csv_path: str, dataset_name: str, positive_
 
     labels_ratio = config_manager.get_value(model_config, "labels_ratio")
     n_train_limited = int(labels_ratio * n_train)
+    train_indices_limited = train_indices[:n_train_limited]
 
-    if labels_ratio!=1:
+    if labels_ratio<=0.1:
         # Bilancia il sottoinsieme
         X_train = full_dataset.X[train_indices]
         y_train = full_dataset.y[train_indices]
@@ -1617,8 +1638,6 @@ def supervised_train_model(processed_csv_path: str, dataset_name: str, positive_
 
         # Ricava gli indici originali riferiti al dataset completo
         train_indices_limited = [train_indices[i] for i in balanced_indices]
-    else:
-        train_indices_limited=train_indices
     
     # Suddivido il dataset in due sottogruppi in modo deterministico
     train_dataset = Subset(full_dataset, train_indices_limited)
