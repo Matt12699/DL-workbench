@@ -1,5 +1,5 @@
 {
-    "NF-UNSW-NB15-v3":{
+    "dataset":{
 
         "numeric_columns":[
             "FLOW_START_MILLISECONDS",
