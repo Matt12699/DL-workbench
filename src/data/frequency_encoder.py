@@ -39,4 +39,15 @@ class FrequencyEncoder(BaseEstimator, TransformerMixin):
             # Mappo ogni valore nella colonna usando la mappa
             X_copy[column] = X_copy[column].map(self.mapping[column]).fillna(0)
 
+        summary = pd.DataFrame({
+            'dtype': X_copy.dtypes,
+            'non_null': X_copy.notnull().sum(),
+            'null': X_copy.isnull().sum(),
+            'memory_MB': X_copy.memory_usage(deep=True) / (1024**2)
+        })
+        print(summary)
+
+        for col in X_copy.columns:
+            print(col, X_copy[col].nunique())
+
         return X_copy

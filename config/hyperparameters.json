@@ -24,8 +24,6 @@
         "dropout": 0.1,
         "hidden_layers": [128,64,32],
         "output_dim": 1
-      },
-
-      "labels_ratio" : 0.0001
+      }
   }
 }

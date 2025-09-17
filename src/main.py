@@ -8,7 +8,7 @@ import torch
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-from sklearn.preprocessing import StandardScaler, normalize
+from sklearn.preprocessing import StandardScaler, normalize, FunctionTransformer
 from sklearn.manifold import TSNE
 from sklearn.metrics import f1_score, confusion_matrix, recall_score, precision_score, precision_recall_curve, auc
 from sklearn.model_selection import train_test_split
@@ -53,6 +53,10 @@ def prepare_data(input_path: str, output_path: str, dataset_name: str):
 
     # Leggo il DataFrame da un file csv
     df = pd.read_csv(input_path) 
+    logging.info("The dataFrame has been opened")
+
+    num_features = df.shape[1]
+    logging.info(f"Initially we have {num_features} features")
 
     # Divido il DataFrame
     train_ratio = 0.9
@@ -72,20 +76,22 @@ def prepare_data(input_path: str, output_path: str, dataset_name: str):
     num_pipeline = Pipeline([
         ("Impute", CustomImputer()),
         ("Scaling", LogMinMaxScaler()),
+        ("to_float32", FunctionTransformer(lambda X: X.astype(np.float32)))
       #  ("ToDataFrame", ArrayToDataFrame()),  # ← step intermedio
        # ("Binning", CustomBinner(method="Quantile"))
-    ])
+    ], verbose=True)
 
     # Pipeline per le feature categoriche 
     # FrequencyEncoder mappa i valori delle feature categoriche a un valore in base alla loro frequenza
     # OneHotEncoder crea una colonna per ogni valore della feature 
     cat_pipeline = Pipeline([
-        ("FrequencyEncoder", FrequencyEncoder(soglia=0.005)),
+        ("FrequencyEncoder", FrequencyEncoder(soglia=0.01)),
+        ("to_int8", FunctionTransformer(lambda X: X.astype(np.int8))),
         ("1hot", OneHotEncoder(# categories=[list(range(21)) for _ in categorical_columns],
                                # handle_unknown="ignore",
                                sparse_output=False
                                )),
-    ])
+    ], verbose=True)
 
     # ColumnTransformer prende tutte le colonne e fa le trasformazioni giuste su feature numeriche e categoriche
     preProcessing = ColumnTransformer([
@@ -97,14 +103,30 @@ def prepare_data(input_path: str, output_path: str, dataset_name: str):
 
     # Dataset processato
     df_train_prepared = preProcessing.transform(train_df)
-
-    # Rimetto i nomi delle feature che si sono persi nel processing
-
+    logging.info("The trainSet has been processed")
+    num_features = df_train_prepared.shape[1]
+    logging.info(f"Now we have {num_features} features")
+   
     # Genero i nomi delle colonne categoriche (ottenuti tramite get_feature_names_out)
     one_hot_column_names = preProcessing.transformers_[1][1].named_steps["1hot"].get_feature_names_out(categorical_columns)
 
     # Combino i nomi delle colonne numeriche e quelle generate dal OneHotEncoder
     all_columns = numeric_columns + list(one_hot_column_names)
+
+    df_train_debugging = pd.DataFrame(df_train_prepared, columns=all_columns)
+
+    summary = pd.DataFrame({
+            'dtype': df_train_debugging.dtypes,
+            'non_null': df_train_debugging.notnull().sum(),
+            'null': df_train_debugging.isnull().sum(),
+            'memory_MB': df_train_debugging.memory_usage(deep=True) / (1024**2)
+        })
+    print(summary)
+
+    for col in df_train_debugging.columns:
+        print(col, df_train_debugging[col].nunique())
+
+    # Rimetto i nomi delle feature che si sono persi nel processing
 
     # Crea il DataFrame con i nomi delle colonne
     df_prepared_df_train = pd.DataFrame(df_train_prepared, columns=all_columns)
@@ -134,7 +156,7 @@ def prepare_data(input_path: str, output_path: str, dataset_name: str):
 
 # ================================================ #
 
-def semi_supervised_AutoEncoder_train_model(processed_csv_path: str, dataset_name: str, positive_label_value: int, plots_dir_train: str , early_stopping_metric: str, model_config: str):
+def semi_supervised_AutoEncoder_train_model(processed_csv_path: str, dataset_name: str, positive_label_value: int, plots_dir_train: str , early_stopping_metric: str, model_config: str, labels_ratio: float):
 
     logging.info("Training model...")
 
@@ -142,13 +164,19 @@ def semi_supervised_AutoEncoder_train_model(processed_csv_path: str, dataset_nam
         positive_label_value=1
 
     if plots_dir_train == None:
-        plots_dir_train = "plots\Semi-Sup_Training_progress"
+        plots_dir_train = r"plots\Semi-Sup_Training_progress"
 
     if early_stopping_metric == None:
         early_stopping_metric = 'val_loss'
 
     if model_config == None:
         model_config = 'small'
+
+    if labels_ratio == None:
+        logging.warning("You should select a label ratio")
+        exit(1)
+    else:
+        labels_ratio = float(sys.argv[9]) 
 
     # Creo la directory per i plot se non esiste
     if not os.path.exists(plots_dir_train):
@@ -157,7 +185,7 @@ def semi_supervised_AutoEncoder_train_model(processed_csv_path: str, dataset_nam
     
 
     # Carico la configurazione del dataset dal JSON
-    config_path= "config/dataset.json"
+    config_path= r"config/dataset.json"
     config_manager = ConfigManager()
     config_manager.load_config(config_path)
 
@@ -169,7 +197,7 @@ def semi_supervised_AutoEncoder_train_model(processed_csv_path: str, dataset_nam
     num_features = full_dataset.X.shape[1]
 
     # Carico la configurazione degli iperparametri dal JSON
-    config_path= "config/hyperparameters.json"
+    config_path= r"config/hyperparameters.json"
     config_manager.load_config(config_path)
     encoder_config = config_manager.get_value(model_config, "encoder")
     decoder_config = config_manager.get_value(model_config, "decoder")
@@ -208,7 +236,6 @@ def semi_supervised_AutoEncoder_train_model(processed_csv_path: str, dataset_nam
     train_indices = list(range(n_train))
     val_indices = list(range(n_train, n_train + n_val))
 
-    labels_ratio = config_manager.get_value(model_config, "labels_ratio")
     n_train_limited = int(labels_ratio * n_train)
     
     train_indices_limited = train_indices[:n_train_limited]
@@ -283,8 +310,9 @@ def semi_supervised_AutoEncoder_train_model(processed_csv_path: str, dataset_nam
     classifier_best_metric_val = -float('inf') if early_stopping_metric != 'val_loss' else float('inf')
     epochs_no_improve = 0
 
-    Encoder_save_path = r"src\model\autoEncoder_trained_encoder.pth"
-    Classifier_save_path = r"src\model\autoEncoder_trained_model.pth"
+    # Se funziona cambia
+    Encoder_save_path = r"src/model/autoEncoder_trained_encoder.pth"
+    Classifier_save_path = r"src/model/autoEncoder_trained_model.pth"
 
     classifier_save_dir = os.path.dirname(Classifier_save_path)
     if not os.path.exists(classifier_save_dir):
@@ -652,7 +680,7 @@ def semi_supervised_AutoEncoder_train_model(processed_csv_path: str, dataset_nam
 
 # ================================================ #
 
-def encoder_train(processed_csv_path: str, dataset_name: str, positive_label_value: int, plots_dir_train: str , model_config: str):
+def encoder_train(processed_csv_path: str, dataset_name: str, positive_label_value: int, plots_dir_train: str , model_config: str, labels_ratio: float):
 
     logging.info("Training model...")
 
@@ -660,10 +688,16 @@ def encoder_train(processed_csv_path: str, dataset_name: str, positive_label_val
         positive_label_value=1
 
     if plots_dir_train == None:
-        plots_dir_train = "plots\Semi-Sup_Training_progress"
+        plots_dir_train = r"plots\Semi-Sup_Training_progress"
 
     if model_config == None:
         model_config = 'small'
+    
+    if labels_ratio == None:
+        logging.warning("You should select a label ratio")
+        exit(1)
+    else:
+        labels_ratio = float(sys.argv[9]) 
 
     # Creo la directory per i plot se non esiste
     if not os.path.exists(plots_dir_train):
@@ -672,7 +706,7 @@ def encoder_train(processed_csv_path: str, dataset_name: str, positive_label_val
     
 
     # Carico la configurazione del dataset dal JSON
-    config_path= "config/dataset.json"
+    config_path= r"config/dataset.json"
     config_manager = ConfigManager()
     config_manager.load_config(config_path)
 
@@ -684,7 +718,7 @@ def encoder_train(processed_csv_path: str, dataset_name: str, positive_label_val
     num_features = full_dataset.X.shape[1]
 
     # Carico la configurazione degli iperparametri dal JSON
-    config_path= "config/hyperparameters.json"
+    config_path= r"config/hyperparameters.json"
     config_manager.load_config(config_path)
     encoder_config = config_manager.get_value(model_config, "encoder")
     decoder_config = config_manager.get_value(model_config, "decoder")
@@ -713,7 +747,6 @@ def encoder_train(processed_csv_path: str, dataset_name: str, positive_label_val
     train_indices = list(range(n_train))
     val_indices = list(range(n_train, n_train + n_val))
 
-    labels_ratio = config_manager.get_value(model_config, "labels_ratio")
     n_train_limited = int(labels_ratio * n_train)
     train_indices_limited = train_indices[:n_train_limited]
 
@@ -774,7 +807,7 @@ def encoder_train(processed_csv_path: str, dataset_name: str, positive_label_val
     encoder_best_metric_val = float('inf') 
     epochs_no_improve = 0
 
-    encoder_save_path = r"src\model\contrastive_trained_encoder.pth"
+    encoder_save_path = r"src/model/contrastive_trained_encoder.pth"
 
     encoder_save_dir = os.path.dirname(encoder_save_path)
     if not os.path.exists(encoder_save_dir):
@@ -907,7 +940,7 @@ def encoder_train(processed_csv_path: str, dataset_name: str, positive_label_val
     plt.close()
     logging.info(f"Loss curve plot saved to {os.path.join(plots_dir_train, f'contrastive_learning_Encoder_loss_curve_{dataset_name}.png')}")
 
-def encoderClassifier_train(processed_csv_path: str, dataset_name: str, positive_label_value: int, plots_dir_train: str , early_stopping_metric: str, model_config: str, encoder_path:str):
+def encoderClassifier_train(processed_csv_path: str, dataset_name: str, positive_label_value: int, plots_dir_train: str , early_stopping_metric: str, model_config: str, encoder_path:str, labels_ratio: float):
 
     logging.info("Training model...")
 
@@ -915,13 +948,18 @@ def encoderClassifier_train(processed_csv_path: str, dataset_name: str, positive
         positive_label_value=1
 
     if plots_dir_train == None:
-        plots_dir_train = "plots\Semi-Sup_Training_progress"
+        plots_dir_train = r"plots\Semi-Sup_Training_progress"
 
     if early_stopping_metric == None:
         early_stopping_metric = 'val_loss'
 
     if model_config == None:
         model_config = 'small'
+    if labels_ratio == None:
+        logging.warning("You should select a label ratio")
+        exit(1)
+    else:
+        labels_ratio = float(sys.argv[11]) 
 
     # Creo la directory per i plot se non esiste
     if not os.path.exists(plots_dir_train):
@@ -930,7 +968,7 @@ def encoderClassifier_train(processed_csv_path: str, dataset_name: str, positive
     
 
     # Carico la configurazione del dataset dal JSON
-    config_path= "config/dataset.json"
+    config_path= r"config/dataset.json"
     config_manager = ConfigManager()
     config_manager.load_config(config_path)
 
@@ -942,7 +980,7 @@ def encoderClassifier_train(processed_csv_path: str, dataset_name: str, positive
     num_features = full_dataset.X.shape[1]
 
     # Carico la configurazione degli iperparametri dal JSON
-    config_path= "config/hyperparameters.json"
+    config_path= r"config/hyperparameters.json"
     config_manager.load_config(config_path)
     classifier_config = config_manager.get_value(model_config, "classifier")
 
@@ -967,9 +1005,9 @@ def encoderClassifier_train(processed_csv_path: str, dataset_name: str, positive
     train_indices = list(range(n_train))
     val_indices = list(range(n_train, n_train + n_val))
 
-    labels_ratio = config_manager.get_value(model_config, "labels_ratio")
     n_train_limited = int(labels_ratio * n_train)
     train_indices_limited = train_indices[:n_train_limited]
+
 
     if labels_ratio<=0.1:
         # Bilancio il sottoinsieme
@@ -1028,7 +1066,7 @@ def encoderClassifier_train(processed_csv_path: str, dataset_name: str, positive
     classifier_best_metric_val = -float('inf') if early_stopping_metric != 'val_loss' else float('inf')
     epochs_no_improve = 0
 
-    Classifier_save_path = r"src\model\contrastive_trained_model.pth"
+    Classifier_save_path = r"src/model/contrastive_trained_model.pth"
 
     classifier_save_dir = os.path.dirname(Classifier_save_path)
     if not os.path.exists(classifier_save_dir):
@@ -1290,7 +1328,7 @@ def semi_supervised_evaluate_model(encoder_path: str, model_path: str, processed
         positive_label_value=1
 
     if plots_dir == None:
-        plots_dir = "plots\evaluation"
+        plots_dir = r"plots\evaluation"
 
     # Creo la directory per i plot se non esiste
     if not os.path.exists(plots_dir):
@@ -1298,7 +1336,7 @@ def semi_supervised_evaluate_model(encoder_path: str, model_path: str, processed
         logging.info(f"Created directory for plots: {plots_dir}")
 
     # Carico la configurazione dal JSON
-    config_path= "config/dataset.json"
+    config_path= r"config/dataset.json"
     config_manager = ConfigManager()
     config_manager.load_config(config_path)
 
@@ -1524,7 +1562,7 @@ def semi_supervised_evaluate_model(encoder_path: str, model_path: str, processed
     perplexity=100,            
     learning_rate='auto',       
     early_exaggeration=24,      
-    n_iter=3000,
+    max_iter=3000,
     init='pca',
     metric='cosine',        
     angle=0.3,
@@ -1558,7 +1596,7 @@ def semi_supervised_evaluate_model(encoder_path: str, model_path: str, processed
 
 # ================================================ #
 
-def supervised_train_model(processed_csv_path: str, dataset_name: str, positive_label_value: int, plots_dir_train: str , early_stopping_metric: str, model_config: str):
+def supervised_train_model(processed_csv_path: str, dataset_name: str, positive_label_value: int, plots_dir_train: str , early_stopping_metric: str, model_config: str, labels_ratio: float):
 
     logging.info("Training model...")
 
@@ -1566,7 +1604,7 @@ def supervised_train_model(processed_csv_path: str, dataset_name: str, positive_
         positive_label_value=1
 
     if plots_dir_train == None:
-        plots_dir_train = "plots\Sup_Training_progress"
+        plots_dir_train = r"plots\Sup_Training_progress"
 
     if early_stopping_metric == None:
         early_stopping_metric = 'val_loss'
@@ -1574,20 +1612,30 @@ def supervised_train_model(processed_csv_path: str, dataset_name: str, positive_
     if model_config == None:
         model_config = 'small'
 
+    if labels_ratio == None:
+        logging.warning("You should select a label ratio")
+        exit(1)
+    else:
+        labels_ratio = float(sys.argv[9]) 
+
     # Creo la directory per i plot se non esiste
     if not os.path.exists(plots_dir_train):
         os.makedirs(plots_dir_train)
         logging.info(f"Created directory for plots: {plots_dir_train}")
+
+    logging.info("Step 1. Directory passed")
     
 
     # Carico la configurazione del dataset dal JSON
-    config_path= "config/dataset.json"
+    config_path= r"config/dataset.json"
     config_manager = ConfigManager()
     config_manager.load_config(config_path)
 
     target_column = config_manager.get_value(dataset_name, "target_column")
 
+    logging.info("Step 2. Im loading the dataset")
     full_dataset = CSVTabularDataset(processed_csv_path, target_column=target_column)
+    logging.info("Step 3. Dataset loaded")
 
     # Ottengo il numero di feature dal dataset 
     num_features = full_dataset.X.shape[1]
@@ -1607,6 +1655,8 @@ def supervised_train_model(processed_csv_path: str, dataset_name: str, positive_
     classifierInput_dim = num_features
     classifierOutput_dim = classifier_config["output_dim"]
 
+    logging.info("Step 4. hyperparameters setted")
+
     # Suddivido il dataset in train e val limitando il numero di dati etichettati
 
     train_ratio = 0.9
@@ -1618,7 +1668,6 @@ def supervised_train_model(processed_csv_path: str, dataset_name: str, positive_
     train_indices = list(range(n_train))
     val_indices = list(range(n_train, n_train + n_val))
 
-    labels_ratio = config_manager.get_value(model_config, "labels_ratio")
     n_train_limited = int(labels_ratio * n_train)
     train_indices_limited = train_indices[:n_train_limited]
 
@@ -1638,6 +1687,8 @@ def supervised_train_model(processed_csv_path: str, dataset_name: str, positive_
 
         # Ricava gli indici originali riferiti al dataset completo
         train_indices_limited = [train_indices[i] for i in balanced_indices]
+
+    logging.info("Step 5. the train set has been balanced")
     
     # Suddivido il dataset in due sottogruppi in modo deterministico
     train_dataset = Subset(full_dataset, train_indices_limited)
@@ -1648,12 +1699,15 @@ def supervised_train_model(processed_csv_path: str, dataset_name: str, positive_
     train_dataLoader = DataLoader(train_dataset, batch_size=64, shuffle=True)
     val_dataLoader = DataLoader(val_dataset, batch_size=64, shuffle=False)
 
+    logging.info("Step 6. DataLoader created")
     # Selezioniamo il dispositivo da usare: GPU, CPU...
     device = torch.accelerator.current_accelerator().type if torch.accelerator.is_available() else "cpu"
     logging.info(f"Using device: {device}")
 
     # Creo il classificatore
     classifier = IDSModel(dropout=classifierDropout, hidden_layers=classifierHidden_layers, input_dim=classifierInput_dim ,output_dim=classifierOutput_dim).to(device)
+
+    logging.info("Step 7. classifier created")
     
     # Definisco il training Loop
     # Numero di epoche
@@ -1668,6 +1722,8 @@ def supervised_train_model(processed_csv_path: str, dataset_name: str, positive_
         'val_recall': [],
         'val_pr_auc':[]
     }  
+
+    logging.info("Step 8. Calculating positive weight")
 
     # Il dataset è bilanciato quindi questa parte non serve
     # --- Calcolo pos_weight per BCEWithLogitsLoss ---
@@ -1701,7 +1757,7 @@ def supervised_train_model(processed_csv_path: str, dataset_name: str, positive_
 
     # --- Fine Calcolo pos_weight ---
     
-
+    logging.info("Step 9. Calculated positive weight")
     # Parametri per Early Stopping
     early_stopping_patience = 25
     early_stopping_min_delta = 0.001 # Miglioramento minimo per considerarlo tale
@@ -1710,7 +1766,7 @@ def supervised_train_model(processed_csv_path: str, dataset_name: str, positive_
     classifier_best_metric_val = -float('inf') if early_stopping_metric != 'val_loss' else float('inf')
     epochs_no_improve = 0
 
-    Classifier_save_path = r"src\model\supervised_trained_model.pth"
+    Classifier_save_path = r"src/model/supervised_trained_model.pth"
 
     classifier_save_dir = os.path.dirname(Classifier_save_path)
     if not os.path.exists(classifier_save_dir):
@@ -1899,7 +1955,7 @@ def supervised_evaluate_model(model_path: str, processed_csv_path: str, dataset_
         positive_label_value=1
 
     if plots_dir == None:
-        plots_dir = "plots\evaluation"
+        plots_dir = r"plots\evaluation"
 
     # Creo la directory per i plot se non esiste
     if not os.path.exists(plots_dir):
@@ -1907,13 +1963,13 @@ def supervised_evaluate_model(model_path: str, processed_csv_path: str, dataset_
         logging.info(f"Created directory for plots: {plots_dir}")
 
     # Carico la configurazione dal JSON
-    config_path= "config/dataset.json"
+    config_path= r"config/dataset.json"
     config_manager = ConfigManager()
     config_manager.load_config(config_path)
 
     target_column = config_manager.get_value(dataset_name, "target_column")
 
-    test_dataset = CSVTabularDataset(processed_csv_path, target_column=target_column)
+    test_dataset = CSVTabularDataset(processed_csv_path, target_column=target_column) 
 
     # Divido i campioni in batch
     test_dataLoader = DataLoader(test_dataset, batch_size=64, shuffle=False)
@@ -2106,7 +2162,7 @@ def supervised_evaluate_model(model_path: str, processed_csv_path: str, dataset_
     perplexity=100,            
     learning_rate='auto',       
     early_exaggeration=24,      
-    n_iter=3000,
+    max_iter=3000,
     init='pca',
     metric='cosine',        
     angle=0.3,
@@ -2150,7 +2206,7 @@ def unsupervised_train_model(processed_csv_path: str, dataset_name: str, positiv
         positive_label_value=1
 
     if plots_dir_train == None:
-        plots_dir_train = 'plots'
+        plots_dir_train = r'plots'
 
     if early_stopping_metric == None:
         early_stopping_metric = 'val_loss'
@@ -2165,7 +2221,7 @@ def unsupervised_train_model(processed_csv_path: str, dataset_name: str, positiv
     
 
     # Carico la configurazione del dataset dal JSON
-    config_path= "config/dataset.json"
+    config_path= r"config/dataset.json"
     config_manager = ConfigManager()
     config_manager.load_config(config_path)
 
@@ -2177,7 +2233,7 @@ def unsupervised_train_model(processed_csv_path: str, dataset_name: str, positiv
     num_features = full_dataset.X.shape[1]
 
     # Carico la configurazione degli iperparametri dal JSON
-    config_path= "config/hyperparameters.json"
+    config_path= r"config/hyperparameters.json"
     config_manager.load_config(config_path)
     encoder_config = config_manager.get_value(model_config, "encoder")
     decoder_config = config_manager.get_value(model_config, "decoder")
@@ -2256,7 +2312,7 @@ def unsupervised_train_model(processed_csv_path: str, dataset_name: str, positiv
     AutoEncoder_best_metric_val = float('inf')
     epochs_no_improve = 0
 
-    autoEncoder_save_path = r"src\model\unsupervised_trained_autoEncoder.pth"
+    autoEncoder_save_path = r"src/model/unsupervised_trained_autoEncoder.pth"
 
     autoEncoder_save_dir = os.path.dirname(autoEncoder_save_path)
     if not os.path.exists(autoEncoder_save_dir):
@@ -2428,7 +2484,7 @@ def unsupervised_evaluate_model(autoEncoder_path: str, processed_csv_path: str, 
         positive_label_value=1
 
     if plots_dir == None:
-        plots_dir = "plots\evaluation"
+        plots_dir = r"plots/evaluation"
 
     # Creo la directory per i plot se non esiste
     if not os.path.exists(plots_dir):
@@ -2436,7 +2492,7 @@ def unsupervised_evaluate_model(autoEncoder_path: str, processed_csv_path: str, 
         logging.info(f"Created directory for plots: {plots_dir}")
 
     # Carico la configurazione dal JSON
-    config_path= "config/dataset.json"
+    config_path= r"config/dataset.json"
     config_manager = ConfigManager()
     config_manager.load_config(config_path)
 
@@ -2640,7 +2696,7 @@ def unsupervised_evaluate_model(autoEncoder_path: str, processed_csv_path: str, 
     perplexity=100,            
     learning_rate='auto',       
     early_exaggeration=24,      
-    n_iter=3000,
+    max_iter=3000,
     init='pca',
     metric='cosine',        
     angle=0.3,
@@ -2680,20 +2736,20 @@ if __name__ == "__main__":
 
     parser.register_subcommands(
         "encoderTrain",
-        ["--input", "--dataset", "--positiveLabel", "--plotsDir", "--config"],
-        ["The input path for the processed data.", "The name of the dataset", "The value of the positive label", "The path for the plots", "The name of the model configuration"],
+        ["--input", "--dataset", "--positiveLabel", "--plotsDir", "--config", "--labelsRatio"],
+        ["The input path for the processed data.", "The name of the dataset", "The value of the positive label", "The path for the plots", "The name of the model configuration", "The ratio of the used labels"],
     )
 
     parser.register_subcommands(
         "AutoEncoderTrain",
-        ["--input", "--dataset", "--positiveLabel", "--plotsDir", "--earlyMetric", "--config"],
-        ["The input path for the processed data.", "The name of the dataset", "The value of the positive label", "The path for the plots", "The early stopping metric", "The name of the model configuration"],
+        ["--input", "--dataset", "--positiveLabel", "--plotsDir", "--earlyMetric", "--config", "--labelsRatio"],
+        ["The input path for the processed data.", "The name of the dataset", "The value of the positive label", "The path for the plots", "The early stopping metric", "The name of the model configuration", "The ratio of the used labels"],
     )
 
     parser.register_subcommands(
         "encoderClassTrainContrastive",
-        ["--input", "--dataset", "--positiveLabel", "--plotsDir", "--earlyMetric", "--config", "--encoder"],
-        ["The input path for the processed data.", "The name of the dataset", "The value of the positive label", "The path for the plots", "The early stopping metric", "The name of the model configuration", "The path for the encoder"],
+        ["--input", "--dataset", "--positiveLabel", "--plotsDir", "--earlyMetric", "--config", "--encoder", "--labelsRatio"],
+        ["The input path for the processed data.", "The name of the dataset", "The value of the positive label", "The path for the plots", "The early stopping metric", "The name of the model configuration", "The path for the encoder", "The ratio of the used labels"],
     )
 
     parser.register_subcommands(
@@ -2704,8 +2760,8 @@ if __name__ == "__main__":
 
     parser.register_subcommands(
         "supTrain",
-        ["--input", "--dataset", "--positiveLabel", "--plotsDir", "--earlyMetric", "--config"],
-        ["The input path for the processed data.", "The name of the dataset", "The value of the positive label", "The path for the plots", "The early stopping metric", "The name of the model configuration"],
+        ["--input", "--dataset", "--positiveLabel", "--plotsDir", "--earlyMetric", "--config", "--labelsRatio"],
+        ["The input path for the processed data.", "The name of the dataset", "The value of the positive label", "The path for the plots", "The early stopping metric", "The name of the model configuration", "The ratio of the used labels"],
     )
 
     parser.register_subcommands(
@@ -2731,15 +2787,15 @@ if __name__ == "__main__":
     if args.subcommand == "prepare":
         prepare_data(args.input, args.output, args.dataset)
     elif args.subcommand == "encoderTrain":
-        encoder_train(args.input, args.dataset, args.positiveLabel, args.plotsDir, args.config)
+        encoder_train(args.input, args.dataset, args.positiveLabel, args.plotsDir, args.config, args.labelsRatio)
     elif args.subcommand == "AutoEncoderTrain":
-        semi_supervised_AutoEncoder_train_model(args.input, args.dataset, args.positiveLabel, args.plotsDir, args.earlyMetric, args.config)
+        semi_supervised_AutoEncoder_train_model(args.input, args.dataset, args.positiveLabel, args.plotsDir, args.earlyMetric, args.config, args.labelsRatio)
     elif args.subcommand == "encoderClassTrainContrastive":
-        encoderClassifier_train(args.input, args.dataset, args.positiveLabel, args.plotsDir, args.earlyMetric, args.config, args.encoder)
+        encoderClassifier_train(args.input, args.dataset, args.positiveLabel, args.plotsDir, args.earlyMetric, args.config, args.encoder, args.labelsRatio)
     elif args.subcommand == "semiSupEvaluate":
         semi_supervised_evaluate_model(args.encoder, args.model, args.input, args.dataset, args.positiveLabel, args.plotsDir)
     elif args.subcommand == "supTrain":
-        supervised_train_model(args.input, args.dataset, args.positiveLabel, args.plotsDir, args.earlyMetric, args.config)
+        supervised_train_model(args.input, args.dataset, args.positiveLabel, args.plotsDir, args.earlyMetric, args.config, args.labelsRatio)
     elif args.subcommand == "supEvaluate":
         supervised_evaluate_model(args.model, args.input, args.dataset, args.positiveLabel, args.plotsDir)
     elif args.subcommand == "unsupTrain":
