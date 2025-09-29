@@ -1,0 +1,14 @@
+ 
+Model input: 82E0AA, 
+Neural Network: 6A5ACD, 
+Raw Scores: A7C7E7, 
+Loss Function: C3ABD0, 
+True Label: 77DD77, 
+Backpropagation: FFFF66 , 
+Loss value o Reconstruction errors: E27D60,
+Sigmoid: B2F2BB,
+Class Probabilities: A3C4F3,
+Threshold comparison: D8BFD8,
+Predicted Labels: FFD700,
+Reconstructed output: B2F2BB,
+Encoded representation: stile verde penultima pagina
